@@ -35,8 +35,8 @@ permissions:
   contents: read
 
 env:
-  TARGET_OWNER: Imperia-Rminana
-  TARGET_REPOSITORY: tags-slave-repo
+  TARGET_OWNER: imperia-scm
+  TARGET_REPOSITORY: tags-slave-repo-fork
 
 jobs:
   prepare:

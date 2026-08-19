@@ -30,7 +30,7 @@ jobs:
       - name: Check out the exact Development source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          repository: Imperia-Rminana/tags-slave-repo
+          repository: imperia-scm/tags-slave-repo-fork
           ref: ${{ inputs.ref }}
           token: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}
           fetch-depth: 1
