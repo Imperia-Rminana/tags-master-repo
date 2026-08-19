@@ -1,0 +1,48 @@
+name: Build gate
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_call:
+    inputs:
+      ref:
+        description: Full branch name or commit SHA to validate
+        required: false
+        type: string
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Full scp-management branch name or commit SHA to validate
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build_gate:
+    name: build-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out the exact Master source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Test release version resolver
+        shell: bash
+        run: bash ./.github/scripts/test-release-version.sh
+
+      - name: Test GitHub API release client
+        shell: bash
+        run: node --test ./.github/scripts/release-api/*.test.cjs

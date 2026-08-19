@@ -1,0 +1,227 @@
+name: Create release
+
+on:
+  workflow_call:
+    inputs:
+      component:
+        required: true
+        type: string
+      booster_name:
+        required: false
+        default: ""
+        type: string
+      release_line:
+        required: true
+        type: string
+      source_branch:
+        required: true
+        type: string
+      dry_run:
+        required: true
+        type: boolean
+      override_version:
+        required: false
+        default: ""
+        type: string
+      override_reason:
+        required: false
+        default: ""
+        type: string
+    secrets:
+      SCP_STUDIO_DEVELOPMENT_PAT:
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TARGET_OWNER: Imperia-Rminana
+  TARGET_REPOSITORY: tags-slave-repo
+
+jobs:
+  prepare:
+    name: Prepare release plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      display_name: ${{ steps.resolve.outputs.display_name }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      previous_tag: ${{ steps.resolve.outputs.previous_tag }}
+      target_sha: ${{ steps.resolve.outputs.target_sha }}
+      is_override: ${{ steps.resolve.outputs.is_override }}
+      is_recovery: ${{ steps.resolve.outputs.is_recovery }}
+
+    steps:
+      - name: Check out release automation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: automation
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Test release version resolver
+        shell: bash
+        run: bash ./automation/.github/scripts/test-release-version.sh
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Test GitHub API release client
+        shell: bash
+        run: node --test ./automation/.github/scripts/release-api/*.test.cjs
+
+      - name: Read Development release state
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          COMPONENT: ${{ inputs.component }}
+          BOOSTER_NAME: ${{ inputs.booster_name }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+        with:
+          github-token: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}
+          script: |
+            const ReadReleaseState = require(
+              './automation/.github/scripts/release-api/read-release-state.cjs'
+            );
+            await ReadReleaseState({
+              github,
+              core,
+              owner: process.env.TARGET_OWNER,
+              repository: process.env.TARGET_REPOSITORY,
+              sourceBranch: process.env.SOURCE_BRANCH,
+              component: process.env.COMPONENT,
+              boosterName: process.env.BOOSTER_NAME,
+              outputPath: './release-state.json'
+            });
+
+      - name: Resolve release version
+        id: resolve
+        shell: bash
+        env:
+          COMPONENT: ${{ inputs.component }}
+          BOOSTER_NAME: ${{ inputs.booster_name }}
+          RELEASE_LINE: ${{ inputs.release_line }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          OVERRIDE_VERSION: ${{ inputs.override_version }}
+          OVERRIDE_REASON: ${{ inputs.override_reason }}
+        run: |
+          bash ./automation/.github/scripts/resolve-release.sh \
+            --component "$COMPONENT" \
+            --booster-name "$BOOSTER_NAME" \
+            --release-line "$RELEASE_LINE" \
+            --source-branch "$SOURCE_BRANCH" \
+            --override-version "$OVERRIDE_VERSION" \
+            --override-reason "$OVERRIDE_REASON" \
+            --state-file ./release-state.json
+
+      - name: Write release preview
+        shell: bash
+        env:
+          DISPLAY_NAME: ${{ steps.resolve.outputs.display_name }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          PREVIOUS_TAG: ${{ steps.resolve.outputs.previous_tag }}
+          TARGET_SHA: ${{ steps.resolve.outputs.target_sha }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          IS_OVERRIDE: ${{ steps.resolve.outputs.is_override }}
+          IS_RECOVERY: ${{ steps.resolve.outputs.is_recovery }}
+          OVERRIDE_REASON: ${{ inputs.override_reason }}
+        run: |
+          tee -a "$GITHUB_STEP_SUMMARY" <<EOF
+          ## Release preview
+
+          | Field | Value |
+          | --- | --- |
+          | Component | \`$DISPLAY_NAME\` |
+          | Version | \`$VERSION\` |
+          | Tag | \`$TAG\` |
+          | Source | \`$SOURCE_BRANCH\` |
+          | Commit | \`$TARGET_SHA\` |
+          | Previous tag | \`$PREVIOUS_TAG\` |
+          | Dry run | \`$DRY_RUN\` |
+          | Override | \`$IS_OVERRIDE\` |
+          | Recovery | \`$IS_RECOVERY\` |
+
+          Override reason: $OVERRIDE_REASON
+          EOF
+
+  build_core:
+    name: Build approved Core source
+    needs: prepare
+    uses: ./.github/workflows/_build-core.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ needs.prepare.outputs.target_sha }}
+    secrets:
+      SCP_STUDIO_DEVELOPMENT_PAT: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}
+
+  publish:
+    name: Publish ${{ needs.prepare.outputs.tag }}
+    needs:
+      - prepare
+      - build_core
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ needs.prepare.outputs.is_override == 'true' && 'release-override' || 'release' }}
+    concurrency:
+      group: release-${{ inputs.component }}-${{ inputs.booster_name }}-${{ inputs.release_line }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out release automation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: automation
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Publish tag, release and metadata in Development
+        id: publish_release
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          TARGET_OWNER: ${{ env.TARGET_OWNER }}
+          TARGET_REPOSITORY: ${{ env.TARGET_REPOSITORY }}
+          COMPONENT: ${{ inputs.component }}
+          BOOSTER_NAME: ${{ inputs.booster_name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET_SHA: ${{ needs.prepare.outputs.target_sha }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          TITLE: ${{ needs.prepare.outputs.display_name }} ${{ needs.prepare.outputs.version }}
+          PREVIOUS_TAG: ${{ needs.prepare.outputs.previous_tag }}
+          IS_OVERRIDE: ${{ needs.prepare.outputs.is_override }}
+          OVERRIDE_REASON: ${{ inputs.override_reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}
+          script: |
+            const PublishRelease = require(
+              './automation/.github/scripts/release-api/publish-release.cjs'
+            );
+            await PublishRelease({ github, core, context, inputs: process.env });
+
+      - name: Write publication result
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          TAG_EXISTED: ${{ steps.publish_release.outputs.tag_existed }}
+          RELEASE_CREATED: ${{ steps.publish_release.outputs.release_created }}
+          TARGET_REPOSITORY: ${{ env.TARGET_OWNER }}/${{ env.TARGET_REPOSITORY }}
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## Publication completed
+
+          - Tag: \`$TAG\`
+          - Repository: \`$TARGET_REPOSITORY\`
+          - Tag already existed: \`$TAG_EXISTED\`
+          - GitHub Release created in this run: \`$RELEASE_CREATED\`
+          EOF

@@ -1,0 +1,46 @@
+name: Release Booster
+
+on:
+  workflow_dispatch:
+    inputs:
+      booster_name:
+        description: Lowercase booster slug, for example forecast
+        required: true
+        type: string
+      release_line:
+        description: "Release line X.Y; source branch is boost/name/X.Y"
+        required: true
+        type: string
+      dry_run:
+        description: Validate and preview without creating a tag or GitHub Release
+        required: true
+        default: true
+        type: boolean
+      override_version:
+        description: "Exceptional exact X.Y.Z; leave empty for automatic patch"
+        required: false
+        type: string
+      override_reason:
+        description: Required justification when override_version is set
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Booster ${{ inputs.booster_name }} ${{ inputs.release_line }}
+    uses: ./.github/workflows/_create-release.yml
+    permissions:
+      contents: read
+    with:
+      component: booster
+      booster_name: ${{ inputs.booster_name }}
+      release_line: ${{ inputs.release_line }}
+      source_branch: boost/${{ inputs.booster_name }}/${{ inputs.release_line }}
+      dry_run: ${{ inputs.dry_run }}
+      override_version: ${{ inputs.override_version }}
+      override_reason: ${{ inputs.override_reason }}
+    secrets:
+      SCP_STUDIO_DEVELOPMENT_PAT: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}

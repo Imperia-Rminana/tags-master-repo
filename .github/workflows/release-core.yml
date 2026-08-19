@@ -1,0 +1,41 @@
+name: Release Core
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_line:
+        description: "Release line X.Y; source branch is always release/X.Y"
+        required: true
+        type: string
+      dry_run:
+        description: Validate and preview without creating a tag or GitHub Release
+        required: true
+        default: true
+        type: boolean
+      override_version:
+        description: "Exceptional exact X.Y.Z; leave empty for automatic patch"
+        required: false
+        type: string
+      override_reason:
+        description: Required justification when override_version is set
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Core ${{ inputs.release_line }}
+    uses: ./.github/workflows/_create-release.yml
+    permissions:
+      contents: read
+    with:
+      component: core
+      release_line: ${{ inputs.release_line }}
+      source_branch: release/${{ inputs.release_line }}
+      dry_run: ${{ inputs.dry_run }}
+      override_version: ${{ inputs.override_version }}
+      override_reason: ${{ inputs.override_reason }}
+    secrets:
+      SCP_STUDIO_DEVELOPMENT_PAT: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}
