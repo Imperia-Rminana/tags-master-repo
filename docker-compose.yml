@@ -1,0 +1,41 @@
+services:
+  webhook-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tags-webhook-api
+    env_file:
+      - .env
+    expose:
+      - "3000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - webhook-network
+
+  webhook-nginx:
+    image: nginx:1.27-alpine
+    container_name: tags-webhook-nginx
+    depends_on:
+      webhook-api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${WEBHOOK_BIND_PORT:-7796}:80"
+    volumes:
+      - ./deploy/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+    restart: unless-stopped
+    networks:
+      - webhook-network
+
+networks:
+  webhook-network:
+    driver: bridge

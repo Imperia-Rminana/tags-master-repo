@@ -225,3 +225,18 @@ jobs:
           - Tag already existed: \`$TAG_EXISTED\`
           - GitHub Release created in this run: \`$RELEASE_CREATED\`
           EOF
+
+  open_promotion:
+    name: Open promotion pull request
+    needs:
+      - prepare
+      - publish
+    if: ${{ !inputs.dry_run }}
+    uses: ./.github/workflows/_open-promotion.yml
+    permissions:
+      contents: read
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}
+      target_sha: ${{ needs.prepare.outputs.target_sha }}
+    secrets:
+      SCP_STUDIO_DEVELOPMENT_PAT: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}

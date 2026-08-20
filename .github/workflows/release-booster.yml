@@ -4,24 +4,24 @@ on:
   workflow_dispatch:
     inputs:
       booster_name:
-        description: Lowercase booster slug, for example forecast
+        description: "Lowercase booster name only (example: demo)"
         required: true
         type: string
       release_line:
-        description: "Release line X.Y; source branch is boost/name/X.Y"
+        description: "Release line only (example: 1.0). Do not enter boost/demo/1.0"
         required: true
         type: string
       dry_run:
-        description: Validate and preview without creating a tag or GitHub Release
+        description: "Preview without publishing (example: true). Use false to create the release"
         required: true
         default: true
         type: boolean
       override_version:
-        description: "Exceptional exact X.Y.Z; leave empty for automatic patch"
+        description: "Optional exact version (example: 1.0.3). Leave empty for automatic patch"
         required: false
         type: string
       override_reason:
-        description: Required justification when override_version is set
+        description: "Reason for the override (example: Recover skipped version). Otherwise leave empty"
         required: false
         type: string
 

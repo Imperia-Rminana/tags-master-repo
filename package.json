@@ -15,6 +15,15 @@
   "type": "commonjs",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server/server.cjs",
+    "test": "node --test server/*.test.cjs .github/scripts/release-api/*.test.cjs",
+    "test:coverage": "node --test --experimental-test-coverage server/*.test.cjs .github/scripts/release-api/*.test.cjs"
+  },
+  "dependencies": {
+    "@octokit/rest": "^22.0.1",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "supertest": "^7.2.2"
   }
 }

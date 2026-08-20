@@ -1,0 +1,52 @@
+name: Open release promotion
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Published Development tag (example: core/2.0.0)"
+        required: true
+        type: string
+      target_sha:
+        description: Exact 40-character Development commit SHA
+        required: true
+        type: string
+    secrets:
+      SCP_STUDIO_DEVELOPMENT_PAT:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  open_promotion:
+    name: Open immutable promotion pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out release automation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: automation
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Open immutable promotion pull request
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          DEVELOPMENT_OWNER: imperia-scm
+          DEVELOPMENT_REPOSITORY: tags-slave-repo-fork
+          PARENT_OWNER: Imperia-Rminana
+          PARENT_REPOSITORY: tags-slave-repo
+          TAG: ${{ inputs.tag }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}
+          script: |
+            const OpenPromotion = require(
+              './automation/.github/scripts/release-api/open-promotion.cjs'
+            );
+            await OpenPromotion({ github, core, inputs: process.env });
