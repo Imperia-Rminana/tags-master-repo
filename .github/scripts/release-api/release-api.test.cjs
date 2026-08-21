@@ -6,9 +6,29 @@ const test = require('node:test');
 
 const ReadReleaseState = require('./read-release-state.cjs');
 const PublishRelease = require('./publish-release.cjs');
+const { CreatePromotionMarker } = require('./promotion-contract.cjs');
 
 const TARGET_SHA = '0123456789abcdef0123456789abcdef01234567';
 const OTHER_SHA = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const CONTRACT_SECRET = '0123456789abcdef0123456789abcdef';
+
+function CreateReservationMarker(pullRequestNumber = 10, overrides = {})
+{
+    return CreatePromotionMarker({
+        schemaVersion: 2,
+        tag: 'core/2.0.0',
+        sourceRepository: 'imperia-scm/tags-slave-repo-fork',
+        sourceBranch: 'release/2.0',
+        parentRepository: 'Imperia-Rminana/tags-slave-repo',
+        parentBaseBranch: 'production',
+        previousTag: 'core/1.9.0',
+        isOverride: false,
+        overrideReason: '',
+        requestedBy: 'release-manager',
+        approvalRunUrl: 'https://github.com/Imperia-Rminana/tags-master-repo/actions/runs/42',
+        ...overrides
+    }, CONTRACT_SECRET, pullRequestNumber);
+}
 
 function CreateError(status, message)
 {
@@ -63,6 +83,9 @@ test('ResolveObjectToCommit handles commits and nested annotated tags', async ()
 
                     return { data: { object: { type: 'commit', sha: TARGET_SHA } } };
                 }
+            },
+            pulls: {
+                list: async () => ({ data: [] })
             }
         }
     };
@@ -70,13 +93,13 @@ test('ResolveObjectToCommit handles commits and nested annotated tags', async ()
     const directCommit = await ReadReleaseState.ResolveObjectToCommit(
         github,
         'imperia-scm',
-        'scp-studio-development',
+        'tags-slave-repo-fork',
         { type: 'commit', sha: TARGET_SHA }
     );
     const annotatedCommit = await ReadReleaseState.ResolveObjectToCommit(
         github,
         'imperia-scm',
-        'scp-studio-development',
+        'tags-slave-repo-fork',
         { type: 'tag', sha: 'tag-one' }
     );
 
@@ -124,21 +147,28 @@ test('ReadReleaseState writes sorted tags resolved to commits', async () =>
     const outputPath = path.join(temporaryDirectory, 'state.json');
     const core = CreateCore();
     const listMatchingRefs = async () => undefined;
+    const listPullRequests = async () => undefined;
     const github = {
         paginate: async (method, parameters) =>
         {
-            assert.equal(method, listMatchingRefs);
-            assert.equal(parameters.ref, 'tags/core/');
-            return [
-                {
-                    ref: 'refs/tags/core/2.0.0',
-                    object: { type: 'tag', sha: 'tag-object' }
-                },
-                {
-                    ref: 'refs/tags/core/1.0.0',
-                    object: { type: 'commit', sha: OTHER_SHA }
-                }
-            ];
+            if (method === listMatchingRefs)
+            {
+                assert.equal(parameters.ref, 'tags/core/');
+                return [
+                    {
+                        ref: 'refs/tags/core/2.0.0',
+                        object: { type: 'tag', sha: 'tag-object' }
+                    },
+                    {
+                        ref: 'refs/tags/core/1.0.0',
+                        object: { type: 'commit', sha: OTHER_SHA }
+                    }
+                ];
+            }
+
+            assert.equal(method, listPullRequests);
+            assert.equal(parameters.base, 'production');
+            return [];
         },
         rest: {
             git: {
@@ -153,6 +183,9 @@ test('ReadReleaseState writes sorted tags resolved to commits', async () =>
                     assert.equal(parameters.tag_sha, 'tag-object');
                     return { data: { object: { type: 'commit', sha: TARGET_SHA } } };
                 }
+            },
+            pulls: {
+                list: listPullRequests
             }
         }
     };
@@ -163,21 +196,137 @@ test('ReadReleaseState writes sorted tags resolved to commits', async () =>
             github,
             core,
             owner: 'imperia-scm',
-            repository: 'scp-studio-development',
+            repository: 'tags-slave-repo-fork',
             sourceBranch: 'release/2.0',
             component: 'core',
             boosterName: '',
+            parentOwner: 'Imperia-Rminana',
+            parentRepository: 'tags-slave-repo',
+            contractSecret: CONTRACT_SECRET,
             outputPath
         });
 
-        assert.equal(state.schemaVersion, 1);
-        assert.equal(state.repository, 'imperia-scm/scp-studio-development');
+        assert.equal(state.schemaVersion, 2);
+        assert.equal(state.repository, 'imperia-scm/tags-slave-repo-fork');
+        assert.deepEqual(state.reservations, []);
         assert.deepEqual(
             state.tags.map((tag) => tag.name),
             ['core/1.0.0', 'core/2.0.0']
         );
         assert.deepEqual(JSON.parse(fs.readFileSync(outputPath, 'utf8')), state);
         assert.match(core.messages[0], /2 matching release tags/);
+    }
+    finally
+    {
+        fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+});
+
+test('ReadReleaseState records open and merged-unfinalized signed reservations', async () =>
+{
+    const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'release-api-'));
+    const outputPath = path.join(temporaryDirectory, 'state.json');
+    const openPullRequest = {
+        number: 10,
+        state: 'open',
+        merged_at: null,
+        body: CreateReservationMarker(),
+        head: {
+            ref: 'release/2.0',
+            sha: TARGET_SHA,
+            repo: { full_name: 'imperia-scm/tags-slave-repo-fork' }
+        },
+        base: { ref: 'production' },
+        html_url: 'https://github.com/Imperia-Rminana/tags-slave-repo/pull/10'
+    };
+    const mergedPullRequest = {
+        ...openPullRequest,
+        number: 11,
+        state: 'closed',
+        merged_at: '2026-08-20T10:00:00Z',
+        body: CreateReservationMarker(11),
+        html_url: 'https://github.com/Imperia-Rminana/tags-slave-repo/pull/11'
+    };
+    const closedPullRequest = {
+        ...openPullRequest,
+        number: 12,
+        state: 'closed',
+        merged_at: null,
+        body: CreateReservationMarker(12)
+    };
+    const unrelatedPullRequest = {
+        ...openPullRequest,
+        number: 9,
+        body: 'Normal pull request without a promotion marker',
+        base: { ref: 'main' }
+    };
+    const listMatchingRefs = async () => undefined;
+    const listPullRequests = async () => undefined;
+    const github = {
+        paginate: async (method, parameters) =>
+        {
+            if (method === listMatchingRefs)
+            {
+                return [];
+            }
+
+            assert.equal(method, listPullRequests);
+            assert.equal(parameters.base, 'production');
+            return [
+                unrelatedPullRequest,
+                openPullRequest,
+                mergedPullRequest,
+                closedPullRequest
+            ];
+        },
+        rest: {
+            git: {
+                listMatchingRefs,
+                getRef: async () => ({
+                    data: { object: { type: 'commit', sha: TARGET_SHA } }
+                })
+            },
+            pulls: {
+                list: listPullRequests
+            }
+        }
+    };
+
+    try
+    {
+        const state = await ReadReleaseState({
+            github,
+            core: CreateCore(),
+            owner: 'imperia-scm',
+            repository: 'tags-slave-repo-fork',
+            sourceBranch: 'release/2.0',
+            component: 'core',
+            boosterName: '',
+            parentOwner: 'Imperia-Rminana',
+            parentRepository: 'tags-slave-repo',
+            contractSecret: CONTRACT_SECRET,
+            outputPath
+        });
+
+        assert.deepEqual(state.reservations.map((reservation) => ({
+            pullRequestNumber: reservation.pullRequestNumber,
+            state: reservation.state,
+            tag: reservation.tag,
+            url: reservation.url
+        })), [
+            {
+                pullRequestNumber: 10,
+                state: 'open',
+                tag: 'core/2.0.0',
+                url: 'https://github.com/Imperia-Rminana/tags-slave-repo/pull/10'
+            },
+            {
+                pullRequestNumber: 11,
+                state: 'merged_pending',
+                tag: 'core/2.0.0',
+                url: 'https://github.com/Imperia-Rminana/tags-slave-repo/pull/11'
+            }
+        ]);
     }
     finally
     {
@@ -223,6 +372,9 @@ test('ReadReleaseState validates inputs and returned references', async () =>
             sourceBranch: 'release/1.0',
             component: 'core',
             boosterName: '',
+            parentOwner: 'owner',
+            parentRepository: 'parent',
+            contractSecret: CONTRACT_SECRET,
             outputPath: 'unused.json'
         }),
         /Unexpected tag reference/
@@ -695,7 +847,7 @@ function CreatePublishParameters(github)
         context: { actor: 'release-manager' },
         inputs: {
             TARGET_OWNER: 'imperia-scm',
-            TARGET_REPOSITORY: 'scp-studio-development',
+            TARGET_REPOSITORY: 'tags-slave-repo-fork',
             SOURCE_BRANCH: 'release/1.0',
             TARGET_SHA,
             TAG: 'core/1.0.0',

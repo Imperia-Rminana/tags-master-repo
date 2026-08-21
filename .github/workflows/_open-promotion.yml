@@ -4,15 +4,40 @@ on:
   workflow_call:
     inputs:
       tag:
-        description: "Published Development tag (example: core/2.0.0)"
+        description: "Published Development tag (ex. core/2.0.0)"
         required: true
         type: string
       target_sha:
         description: Exact 40-character Development commit SHA
         required: true
         type: string
+      source_branch:
+        required: true
+        type: string
+      previous_tag:
+        required: false
+        default: ""
+        type: string
+      is_override:
+        required: true
+        type: string
+      override_reason:
+        required: false
+        default: ""
+        type: string
+      requested_by:
+        required: true
+        type: string
+      approval_environment:
+        required: true
+        type: string
+      concurrency_group:
+        required: true
+        type: string
     secrets:
       SCP_STUDIO_DEVELOPMENT_PAT:
+        required: true
+      SCP_PROMOTION_CONTRACT_SECRET:
         required: true
 
 permissions:
@@ -20,9 +45,13 @@ permissions:
 
 jobs:
   open_promotion:
-    name: Open immutable promotion pull request
+    name: Open direct promotion pull request
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: ${{ inputs.approval_environment }}
+    concurrency:
+      group: ${{ inputs.concurrency_group }}
+      cancel-in-progress: false
 
     steps:
       - name: Check out release automation
@@ -33,7 +62,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Open immutable promotion pull request
+      - name: Open or update direct promotion pull request
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           DEVELOPMENT_OWNER: imperia-scm
@@ -42,6 +71,12 @@ jobs:
           PARENT_REPOSITORY: tags-slave-repo
           TAG: ${{ inputs.tag }}
           TARGET_SHA: ${{ inputs.target_sha }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          PREVIOUS_TAG: ${{ inputs.previous_tag }}
+          IS_OVERRIDE: ${{ inputs.is_override }}
+          OVERRIDE_REASON: ${{ inputs.override_reason }}
+          REQUESTED_BY: ${{ inputs.requested_by }}
+          CONTRACT_SECRET: ${{ secrets.SCP_PROMOTION_CONTRACT_SECRET }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         with:
           github-token: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}

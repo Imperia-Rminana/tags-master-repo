@@ -256,6 +256,86 @@ async function UploadMetadata(parameters)
     });
 }
 
+async function PublishApprovedRelease(parameters)
+{
+    const { github, core, context, inputs } = parameters;
+    const owner = inputs.TARGET_OWNER;
+    const repository = inputs.TARGET_REPOSITORY;
+    const sourceBranch = inputs.SOURCE_BRANCH;
+    const targetSha = inputs.TARGET_SHA;
+    const tag = inputs.TAG;
+    const runUrl = inputs.RUN_URL;
+
+    if (!owner || !repository || !sourceBranch || !targetSha || !tag || !runUrl)
+    {
+        throw new Error('Target repository and approved release data are required.');
+    }
+    if (!/^[0-9a-f]{40}$/.test(targetSha))
+    {
+        throw new Error(`Approved target SHA '${targetSha}' is invalid.`);
+    }
+
+    const tagExisted = await EnsureAnnotatedTag({
+        github,
+        owner,
+        repository,
+        tag,
+        targetSha,
+        sourceBranch,
+        runUrl
+    });
+    const releaseResult = await EnsureRelease({
+        github,
+        owner,
+        repository,
+        tag,
+        title: inputs.TITLE,
+        targetSha,
+        previousTag: inputs.PREVIOUS_TAG,
+        overrideReason: inputs.OVERRIDE_REASON
+    });
+    const publishedAtUtc = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const requestedBy = inputs.REQUESTED_BY || context.actor;
+    const metadata = {
+        schemaVersion: 2,
+        component: inputs.COMPONENT,
+        boosterName: inputs.BOOSTER_NAME,
+        version: inputs.VERSION,
+        tag,
+        commit: targetSha,
+        sourceBranch,
+        previousTag: inputs.PREVIOUS_TAG,
+        publishedAtUtc,
+        actor: requestedBy,
+        requestedBy,
+        mergedBy: inputs.MERGED_BY || '',
+        workflowUrl: runUrl,
+        approvalWorkflowUrl: inputs.APPROVAL_RUN_URL || runUrl,
+        publicationWorkflowUrl: runUrl,
+        promotionPullRequestUrl: inputs.PROMOTION_PULL_REQUEST_URL || '',
+        buildGate: 'scp-management/release-candidate',
+        override: inputs.IS_OVERRIDE === 'true',
+        overrideReason: inputs.OVERRIDE_REASON
+    };
+    await UploadMetadata({
+        github,
+        owner,
+        repository,
+        release: releaseResult.release,
+        metadata
+    });
+
+    core.setOutput('tag_existed', String(tagExisted));
+    core.setOutput('release_created', String(releaseResult.releaseCreated));
+    core.info(`Published ${tag} in ${owner}/${repository}.`);
+
+    return {
+        tagExisted,
+        releaseCreated: releaseResult.releaseCreated,
+        metadata
+    };
+}
+
 async function PublishRelease(parameters)
 {
     const { github, core, context, inputs } = parameters;
@@ -295,59 +375,7 @@ async function PublishRelease(parameters)
         );
     }
 
-    const tagExisted = await EnsureAnnotatedTag({
-        github,
-        owner,
-        repository,
-        tag,
-        targetSha,
-        sourceBranch,
-        runUrl
-    });
-    const releaseResult = await EnsureRelease({
-        github,
-        owner,
-        repository,
-        tag,
-        title: inputs.TITLE,
-        targetSha,
-        previousTag: inputs.PREVIOUS_TAG,
-        overrideReason: inputs.OVERRIDE_REASON
-    });
-    const publishedAtUtc = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-    const metadata = {
-        schemaVersion: 1,
-        component: inputs.COMPONENT,
-        boosterName: inputs.BOOSTER_NAME,
-        version: inputs.VERSION,
-        tag,
-        commit: targetSha,
-        sourceBranch,
-        previousTag: inputs.PREVIOUS_TAG,
-        publishedAtUtc,
-        actor: context.actor,
-        workflowUrl: runUrl,
-        buildGate: 'passed',
-        override: inputs.IS_OVERRIDE === 'true',
-        overrideReason: inputs.OVERRIDE_REASON
-    };
-    await UploadMetadata({
-        github,
-        owner,
-        repository,
-        release: releaseResult.release,
-        metadata
-    });
-
-    core.setOutput('tag_existed', String(tagExisted));
-    core.setOutput('release_created', String(releaseResult.releaseCreated));
-    core.info(`Published ${tag} in ${owner}/${repository}.`);
-
-    return {
-        tagExisted,
-        releaseCreated: releaseResult.releaseCreated,
-        metadata
-    };
+    return PublishApprovedRelease(parameters);
 }
 
 module.exports = PublishRelease;
@@ -355,4 +383,5 @@ module.exports.EnsureAnnotatedTag = EnsureAnnotatedTag;
 module.exports.EnsureRelease = EnsureRelease;
 module.exports.GetReferenceOrNull = GetReferenceOrNull;
 module.exports.GetReleaseOrNull = GetReleaseOrNull;
+module.exports.PublishApprovedRelease = PublishApprovedRelease;
 module.exports.UploadMetadata = UploadMetadata;

@@ -39,3 +39,4 @@ jobs:
       override_reason: ${{ inputs.override_reason }}
     secrets:
       SCP_STUDIO_DEVELOPMENT_PAT: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}
+      SCP_PROMOTION_CONTRACT_SECRET: ${{ secrets.SCP_PROMOTION_CONTRACT_SECRET }}

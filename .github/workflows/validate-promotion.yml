@@ -1,0 +1,159 @@
+name: Validate promotion candidate
+
+on:
+  repository_dispatch:
+    types:
+      - promotion_candidate_changed
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: "Open scp-codex PR number to validate (example: 1234)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    validate-promotion-${{
+      github.event.client_payload.parent_repository || 'Imperia-Rminana/tags-slave-repo'
+    }}-${{
+      github.event.client_payload.pull_request_number || inputs.pull_request_number
+    }}
+  cancel-in-progress: true
+
+jobs:
+  inspect:
+    name: Inspect candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      stale: ${{ steps.candidate.outputs.stale }}
+      requires_build: ${{ steps.candidate.outputs.requires_build }}
+      head_sha: ${{ steps.candidate.outputs.head_sha }}
+
+    steps:
+      - name: Check out release automation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: automation
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Read and validate candidate
+        id: candidate
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          DISPATCH_PARENT_REPOSITORY: ${{ github.event.client_payload.parent_repository }}
+          DEVELOPMENT_OWNER: imperia-scm
+          DEVELOPMENT_REPOSITORY: tags-slave-repo-fork
+          PARENT_OWNER: Imperia-Rminana
+          PARENT_REPOSITORY: tags-slave-repo
+          PULL_REQUEST_NUMBER: >-
+            ${{ github.event.client_payload.pull_request_number || inputs.pull_request_number }}
+          EXPECTED_HEAD_SHA: ${{ github.event.client_payload.head_sha }}
+          CONTRACT_SECRET: ${{ secrets.SCP_PROMOTION_CONTRACT_SECRET }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}
+          script: |
+            const expectedParent = `${process.env.PARENT_OWNER}/${process.env.PARENT_REPOSITORY}`;
+            if (context.eventName === 'repository_dispatch' &&
+                process.env.DISPATCH_PARENT_REPOSITORY !== expectedParent)
+            {
+              throw new Error('The dispatch parent repository is not allowed.');
+            }
+
+            const ValidatePromotion = require(
+              './automation/.github/scripts/release-api/validate-promotion.cjs'
+            );
+            let candidate;
+            try
+            {
+              candidate = await ValidatePromotion.ReadCandidate({
+                github,
+                core,
+                inputs: process.env
+              });
+            }
+            catch (error)
+            {
+              if (/^[0-9a-f]{40}$/.test(process.env.EXPECTED_HEAD_SHA || ''))
+              {
+                await ValidatePromotion.SetCandidateStatus({
+                  github,
+                  inputs: process.env,
+                  headSha: process.env.EXPECTED_HEAD_SHA,
+                  state: 'failure'
+                });
+              }
+              throw error;
+            }
+            if (!candidate.stale && candidate.requiresBuild)
+            {
+              await ValidatePromotion.SetCandidateStatus({
+                github,
+                inputs: process.env,
+                headSha: candidate.headSha,
+                state: 'pending'
+              });
+            }
+
+  build:
+    name: Build current candidate
+    needs: inspect
+    if: >-
+      needs.inspect.outputs.stale != 'true' &&
+      needs.inspect.outputs.requires_build == 'true'
+    uses: ./.github/workflows/_build-core.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ needs.inspect.outputs.head_sha }}
+    secrets:
+      SCP_STUDIO_DEVELOPMENT_PAT: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}
+
+  report:
+    name: Publish candidate result
+    needs:
+      - inspect
+      - build
+    if: >-
+      always() &&
+      needs.inspect.result == 'success' &&
+      needs.inspect.outputs.stale != 'true' &&
+      needs.inspect.outputs.requires_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out release automation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: automation
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Publish final candidate status
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          PARENT_OWNER: Imperia-Rminana
+          PARENT_REPOSITORY: tags-slave-repo
+          HEAD_SHA: ${{ needs.inspect.outputs.head_sha }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}
+          script: |
+            const ValidatePromotion = require(
+              './automation/.github/scripts/release-api/validate-promotion.cjs'
+            );
+            await ValidatePromotion.SetCandidateStatus({
+              github,
+              inputs: process.env,
+              headSha: process.env.HEAD_SHA,
+              state: process.env.BUILD_RESULT === 'success' ? 'success' : 'failure'
+            });

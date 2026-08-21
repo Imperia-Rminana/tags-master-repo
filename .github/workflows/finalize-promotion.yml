@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       pull_request_number:
-        description: "Merged tags-slave-repo PR number (example: 1234)"
+        description: "Merged scp-codex PR number (example: 1234)"
         required: true
         type: string
 
@@ -50,6 +50,9 @@ jobs:
           DEVELOPMENT_TRUNK_BRANCH: main
           PULL_REQUEST_NUMBER: >-
             ${{ github.event.client_payload.pull_request_number || inputs.pull_request_number }}
+          EXPECTED_HEAD_SHA: ${{ github.event.client_payload.head_sha }}
+          EXPECTED_MERGE_COMMIT_SHA: ${{ github.event.client_payload.merge_commit_sha }}
+          CONTRACT_SECRET: ${{ secrets.SCP_PROMOTION_CONTRACT_SECRET }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         with:
           github-token: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}
@@ -70,15 +73,17 @@ jobs:
         shell: bash
         env:
           TAG: ${{ steps.finalize.outputs.tag }}
-          TAG_EXISTED: ${{ steps.finalize.outputs.tag_existed }}
+          DEVELOPMENT_TAG_EXISTED: ${{ steps.finalize.outputs.development_tag_existed }}
+          RELEASE_CREATED: ${{ steps.finalize.outputs.release_created }}
+          PARENT_TAG_EXISTED: ${{ steps.finalize.outputs.parent_tag_existed }}
           REINTEGRATION_PR_URL: ${{ steps.finalize.outputs.reintegration_pr_url }}
-          SNAPSHOT_DELETED: ${{ steps.finalize.outputs.snapshot_deleted }}
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<EOF
           ## Promotion finalized
 
-          - Codex tag: \`$TAG\`
-          - Tag already existed: \`$TAG_EXISTED\`
+          - Development and Codex tag: \`$TAG\`
+          - Development tag already existed: \`$DEVELOPMENT_TAG_EXISTED\`
+          - GitHub Release created in this run: \`$RELEASE_CREATED\`
+          - Codex tag already existed: \`$PARENT_TAG_EXISTED\`
           - Reintegration pull request: \`$REINTEGRATION_PR_URL\`
-          - Promotion snapshot deleted: \`$SNAPSHOT_DELETED\`
           EOF

@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const { ParsePromotionMarker, ParseTag } = require('./promotion-contract.cjs');
 
 function GetTagPrefix(component, boosterName)
 {
@@ -56,10 +57,14 @@ async function ReadReleaseState(parameters)
         sourceBranch,
         component,
         boosterName,
+        parentOwner,
+        parentRepository,
+        contractSecret,
         outputPath
     } = parameters;
 
-    if (!owner || !repository || !sourceBranch || !outputPath)
+    if (!owner || !repository || !sourceBranch || !parentOwner || !parentRepository ||
+        !contractSecret || !outputPath)
     {
         throw new Error('Owner, repository, source branch and output path are required.');
     }
@@ -102,17 +107,75 @@ async function ReadReleaseState(parameters)
     }
 
     tags.sort((left, right) => left.name.localeCompare(right.name));
+    const expectedParentBaseBranch = component === 'core' ? 'production' : sourceBranch;
+    const pullRequests = await github.paginate(github.rest.pulls.list, {
+        owner: parentOwner,
+        repo: parentRepository,
+        state: 'all',
+        head: `${owner}:${sourceBranch}`,
+        base: expectedParentBaseBranch,
+        per_page: 100
+    });
+    const reservations = [];
+    const publishedTags = new Set(tags.map((tag) => tag.name));
+    for (const pullRequest of pullRequests)
+    {
+        const expectedSourceRepository = `${owner}/${repository}`;
+        if (!pullRequest.head || pullRequest.head.ref !== sourceBranch ||
+            !pullRequest.head.repo ||
+            pullRequest.head.repo.full_name !== expectedSourceRepository ||
+            !pullRequest.base || pullRequest.base.ref !== expectedParentBaseBranch)
+        {
+            continue;
+        }
+        if (pullRequest.state === 'closed' && !pullRequest.merged_at)
+        {
+            continue;
+        }
+        const metadata = ParsePromotionMarker(
+            pullRequest.body || '',
+            contractSecret,
+            pullRequest.number
+        );
+        const contract = ParseTag(metadata.tag);
+        const expectedParentRepository = `${parentOwner}/${parentRepository}`;
+        if (metadata.sourceRepository !== expectedSourceRepository ||
+            metadata.sourceBranch !== sourceBranch ||
+            metadata.parentRepository !== expectedParentRepository ||
+            contract.sourceBranch !== sourceBranch ||
+            contract.parentBaseBranch !== expectedParentBaseBranch)
+        {
+            throw new Error(`Promotion pull request #${pullRequest.number} does not match its contract.`);
+        }
+        if (pullRequest.merged_at && publishedTags.has(metadata.tag))
+        {
+            continue;
+        }
+        reservations.push({
+            pullRequestNumber: pullRequest.number,
+            url: pullRequest.html_url,
+            state: pullRequest.merged_at ? 'merged_pending' : 'open',
+            tag: metadata.tag,
+            sourceBranch: metadata.sourceBranch,
+            previousTag: metadata.previousTag,
+            isOverride: metadata.isOverride,
+            overrideReason: metadata.overrideReason
+        });
+    }
+    reservations.sort((left, right) => left.pullRequestNumber - right.pullRequestNumber);
     const state = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         repository: `${owner}/${repository}`,
         sourceBranch,
         targetSha,
-        tags
+        tags,
+        reservations
     };
 
     fs.writeFileSync(outputPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
     core.info(
-        `Resolved ${sourceBranch} at ${targetSha} with ${tags.length} matching release tags.`
+        `Resolved ${sourceBranch} at ${targetSha} with ${tags.length} matching release tags ` +
+        `and ${reservations.length} active reservations.`
     );
 
     return state;

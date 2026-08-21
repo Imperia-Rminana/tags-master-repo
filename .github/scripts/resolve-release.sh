@@ -82,7 +82,7 @@ state_schema=$(jq -r '.schemaVersion // empty' "$state_file") || {
   release_error 'Could not read the release state file.'
   exit 1
 }
-[[ $state_schema == 1 ]] || {
+[[ $state_schema == 2 ]] || {
   release_error "Release state schema '$state_schema' is not supported."
   exit 1
 }
@@ -101,12 +101,93 @@ jq -e '.tags | type == "array" and all(.[]; (.name | type == "string") and (.com
   release_error 'Release state tags are invalid.'
   exit 1
 }
+jq -e '.reservations | type == "array" and all(.[];
+  (.pullRequestNumber | type == "number") and
+  (.url | type == "string") and
+  (.state == "open" or .state == "merged_pending") and
+  (.tag | type == "string") and
+  (.sourceBranch | type == "string") and
+  (.previousTag | type == "string") and
+  (.isOverride | type == "boolean") and
+  (.overrideReason | type == "string"))' "$state_file" >/dev/null || {
+  release_error 'Release state reservations are invalid.'
+  exit 1
+}
 mapfile -t tags < <(jq -r '.tags[].name' "$state_file")
 line_tag_regex=''
 if [[ $component == core ]]; then
   line_tag_regex="^core/${release_line//./\\.}\\.(0|[1-9][0-9]*)$"
 else
   line_tag_regex="^boost/$booster_name/${release_line//./\\.}\\.(0|[1-9][0-9]*)$"
+fi
+
+reservation_count=$(jq --arg sourceBranch "$source_branch" \
+  '[.reservations[] | select(.sourceBranch == $sourceBranch)] | length' "$state_file")
+if ((reservation_count > 1)); then
+  release_error "More than one active reservation exists for '$source_branch'."
+  exit 1
+fi
+if ((reservation_count == 1)); then
+  reservation_state=$(jq -r --arg sourceBranch "$source_branch" \
+    '.reservations[] | select(.sourceBranch == $sourceBranch) | .state' "$state_file")
+  reservation_url=$(jq -r --arg sourceBranch "$source_branch" \
+    '.reservations[] | select(.sourceBranch == $sourceBranch) | .url' "$state_file")
+  if [[ $reservation_state == merged_pending ]]; then
+    release_error "Release reservation '$reservation_url' was merged and must be finalized before another candidate can be created."
+    exit 1
+  fi
+
+  reserved_tag=$(jq -r --arg sourceBranch "$source_branch" \
+    '.reservations[] | select(.sourceBranch == $sourceBranch) | .tag' "$state_file")
+  reserved_previous_tag=$(jq -r --arg sourceBranch "$source_branch" \
+    '.reservations[] | select(.sourceBranch == $sourceBranch) | .previousTag' "$state_file")
+  reserved_is_override=$(jq -r --arg sourceBranch "$source_branch" \
+    '.reservations[] | select(.sourceBranch == $sourceBranch) | .isOverride' "$state_file")
+  reserved_override_reason=$(jq -r --arg sourceBranch "$source_branch" \
+    '.reservations[] | select(.sourceBranch == $sourceBranch) | .overrideReason' "$state_file")
+
+  if [[ ! $reserved_tag =~ $line_tag_regex ]]; then
+    release_error "Reserved tag '$reserved_tag' does not belong to '$source_branch'."
+    exit 1
+  fi
+  if [[ -n $override_version ]]; then
+    expected_override_tag="core/$override_version"
+    [[ $component == booster ]] && expected_override_tag="boost/$booster_name/$override_version"
+    [[ $reserved_tag == "$expected_override_tag" && $reserved_is_override == true && $reserved_override_reason == "$override_reason" ]] || {
+      release_error 'Override inputs do not match the existing signed reservation.'
+      exit 1
+    }
+  fi
+
+  display_name='Core'
+  [[ $component == booster ]] && display_name="Booster $booster_name"
+  reserved_version=${reserved_tag##*/}
+  plan=$(jq -n \
+    --arg display_name "$display_name" \
+    --arg version "$reserved_version" \
+    --arg tag "$reserved_tag" \
+    --arg previous_tag "$reserved_previous_tag" \
+    --arg target_sha "$target_sha" \
+    --arg override_reason "$reserved_override_reason" \
+    --argjson is_override "$reserved_is_override" \
+    '{
+      display_name: $display_name,
+      version: $version,
+      tag: $tag,
+      previous_tag: $previous_tag,
+      target_sha: $target_sha,
+      is_override: $is_override,
+      is_recovery: true,
+      override_reason: $override_reason
+    }')
+
+  if [[ -n $github_output ]]; then
+    while IFS='=' read -r key value; do
+      printf '%s=%s\n' "$key" "$value" >> "$github_output"
+    done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$plan")
+  fi
+  jq . <<< "$plan"
+  exit 0
 fi
 
 existing_tag_at_target=''
@@ -130,6 +211,8 @@ plan=$(get_release_plan \
   "$override_version" \
   "$existing_tag_at_target" \
   "${tags[@]}")
+plan=$(jq --arg override_reason "$override_reason" \
+  '. + {override_reason: $override_reason}' <<< "$plan")
 
 if [[ -n $github_output ]]; then
   while IFS='=' read -r key value; do

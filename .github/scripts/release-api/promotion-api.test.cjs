@@ -3,106 +3,110 @@ const test = require('node:test');
 
 const {
     CreatePromotionMarker,
-    ParsePromotionBranch,
     ParsePromotionMarker,
     ParseTag
 } = require('./promotion-contract.cjs');
 const OpenPromotion = require('./open-promotion.cjs');
+const ValidatePromotion = require('./validate-promotion.cjs');
 const FinalizePromotion = require('./finalize-promotion.cjs');
 
 const SOURCE_SHA = '0123456789abcdef0123456789abcdef01234567';
-const PRODUCTION_SHA = '1111111111111111111111111111111111111111';
+const NEXT_SHA = '1111111111111111111111111111111111111111';
+const PRODUCTION_SHA = '2222222222222222222222222222222222222222';
+const MERGE_SHA = '3333333333333333333333333333333333333333';
+const CONTRACT_SECRET = '0123456789abcdef0123456789abcdef';
 
-test('ParseTag maps a Core tag to production promotion', () =>
+function CreateMarkerMetadata(overrides = {})
+{
+    return {
+        schemaVersion: 2,
+        tag: 'core/2.0.0',
+        sourceRepository: 'imperia-scm/tags-slave-repo-fork',
+        sourceBranch: 'release/2.0',
+        parentRepository: 'Imperia-Rminana/tags-slave-repo',
+        parentBaseBranch: 'production',
+        previousTag: 'core/1.9.4',
+        isOverride: false,
+        overrideReason: '',
+        requestedBy: 'release-manager',
+        approvalRunUrl: 'https://github.com/Imperia-Rminana/tags-master-repo/actions/runs/42',
+        ...overrides
+    };
+}
+
+test('ParseTag maps tags to direct source and parent branches', () =>
 {
     assert.deepEqual(ParseTag('core/2.0.1'), {
         component: 'core',
         boosterName: '',
         releaseLine: '2.0',
+        version: '2.0.1',
         tag: 'core/2.0.1',
-        promotionBranch: 'promotion/core/2.0.1',
+        sourceBranch: 'release/2.0',
         parentBaseBranch: 'production'
     });
-});
-
-test('ParseTag maps a Booster tag to its versioned parent branch', () =>
-{
     assert.deepEqual(ParseTag('boost/demo/2.0.3'), {
         component: 'booster',
         boosterName: 'demo',
         releaseLine: '2.0',
+        version: '2.0.3',
         tag: 'boost/demo/2.0.3',
-        promotionBranch: 'promotion/boost/demo/2.0.3',
+        sourceBranch: 'boost/demo/2.0',
         parentBaseBranch: 'boost/demo/2.0'
     });
+    assert.throws(() => ParseTag('core/2x0x1'), /invalid/);
+    assert.throws(() => ParseTag('boost/demo/2x0x1'), /invalid/);
 });
 
-test('ParseTag rejects unsupported names and leading zeroes', () =>
+test('signed promotion marker round-trips canonical metadata', () =>
 {
-    for (const tag of ['core/02.0.1', 'core/2.0', 'boost/Demo/2.0.1', 'other/2.0.1'])
-    {
-        assert.throws(() => ParseTag(tag), /invalid/i);
-    }
+    const marker = CreatePromotionMarker(CreateMarkerMetadata(), CONTRACT_SECRET, 41);
+    const parsed = ParsePromotionMarker(`Candidate\n\n${marker}`, CONTRACT_SECRET, 41);
+
+    assert.deepEqual(parsed, CreateMarkerMetadata());
+    assert.match(marker, /"signature":"sha256=[0-9a-f]{64}"/);
 });
 
-test('ParsePromotionBranch accepts only immutable promotion branches', () =>
+test('signed promotion marker rejects tampering, wrong secrets and unknown fields', () =>
 {
-    assert.equal(ParsePromotionBranch('promotion/core/2.0.1').tag, 'core/2.0.1');
-    assert.equal(
-        ParsePromotionBranch('promotion/boost/demo/2.0.1').tag,
-        'boost/demo/2.0.1'
-    );
-    assert.throws(() => ParsePromotionBranch('release/2.0'), /promotion/i);
-});
+    const marker = CreatePromotionMarker(CreateMarkerMetadata(), CONTRACT_SECRET, 41);
 
-test('Promotion marker round-trips canonical release metadata', () =>
-{
-    const contract = ParseTag('core/2.0.1');
-    const marker = CreatePromotionMarker(
-        contract,
-        SOURCE_SHA,
-        'imperia-scm/scp-studio-development',
-        'https://github.com/imperia-scm/scp-management/actions/runs/42'
-    );
-
-    assert.deepEqual(ParsePromotionMarker(`Release promotion\n\n${marker}`), {
-        schemaVersion: 1,
-        tag: 'core/2.0.1',
-        sourceSha: SOURCE_SHA,
-        sourceRepository: 'imperia-scm/scp-studio-development',
-        runUrl: 'https://github.com/imperia-scm/scp-management/actions/runs/42'
-    });
-});
-
-test('Promotion marker rejects missing, duplicate and malformed metadata', () =>
-{
-    const contract = ParseTag('core/2.0.1');
-    const marker = CreatePromotionMarker(
-        contract,
-        SOURCE_SHA,
-        'imperia-scm/scp-studio-development',
-        'https://github.com/imperia-scm/scp-management/actions/runs/42'
-    );
-
-    assert.throws(() => ParsePromotionMarker('No marker'), /marker/i);
-    assert.throws(() => ParsePromotionMarker(`${marker}\n${marker}`), /exactly one/i);
     assert.throws(
-        () => ParsePromotionMarker('<!-- scp-promotion:{"schemaVersion":1} -->'),
-        /metadata/i
-    );
-    assert.throws(() => ParsePromotionMarker('<!-- scp-promotion:{'), /malformed/i);
-    assert.throws(() => ParsePromotionMarker('<!-- scp-promotion:no-json -->'), /JSON/i);
-    assert.throws(
-        () => CreatePromotionMarker(null, SOURCE_SHA, 'owner/repo', 'https://example.test'),
-        /SHA/i
+        () => ParsePromotionMarker(
+            marker.replace('core/2.0.0', 'core/9.0.0'), CONTRACT_SECRET, 41
+        ),
+        /signature/i
     );
     assert.throws(
-        () => CreatePromotionMarker(contract, SOURCE_SHA, 'invalid', 'https://example.test'),
-        /repository/i
+        () => ParsePromotionMarker(marker, 'abcdef0123456789abcdef0123456789', 41),
+        /signature/i
     );
     assert.throws(
-        () => CreatePromotionMarker(contract, SOURCE_SHA, 'owner/repo', 'http://example.test'),
-        /URL/i
+        () => CreatePromotionMarker(
+            { ...CreateMarkerMetadata(), unexpected: true }, CONTRACT_SECRET, 41
+        ),
+        /fields/i
+    );
+    assert.throws(
+        () => CreatePromotionMarker(CreateMarkerMetadata(), 'short', 41),
+        /secret/i
+    );
+    assert.throws(
+        () => CreatePromotionMarker(CreateMarkerMetadata({
+            isOverride: true,
+            overrideReason: 'Approved --> copied marker'
+        }), CONTRACT_SECRET, 41),
+        /delimiter/i
+    );
+    assert.throws(
+        () => ParsePromotionMarker(
+            '<!-- scp-promotion:{"schemaVersion":1} -->', CONTRACT_SECRET, 41
+        ),
+        /schema/i
+    );
+    assert.throws(
+        () => ParsePromotionMarker(marker, CONTRACT_SECRET, 42),
+        /signature/i
     );
 });
 
@@ -113,61 +117,107 @@ function CreateNotFoundError()
     return error;
 }
 
-function CreatePromotionGithub(options = {})
+function CreateOpenPromotionGithub(options = {})
 {
     const createdReferences = [];
     const createdPullRequests = [];
-    const existingReferences = options.existingReferences || {};
-    const existingPullRequests = options.existingPullRequests || [];
+    const updatedPullRequests = [];
+    const createdStatuses = [];
+    const pullRequests = options.pullRequests || [];
     const github = {
         rest: {
             git: {
                 getRef: async (parameters) =>
                 {
-                    if (parameters.ref === `tags/${options.tag || 'core/2.0.0'}`)
+                    if (parameters.repo === 'tags-slave-repo-fork' &&
+                        parameters.ref === `heads/${options.sourceBranch || 'release/2.0'}`)
                     {
-                        return { data: { object: { type: 'tag', sha: 'tag-object' } } };
+                        return {
+                            data: {
+                                object: {
+                                    type: 'commit',
+                                    sha: options.sourceSha || SOURCE_SHA
+                                }
+                            }
+                        };
                     }
-                    if (parameters.ref === 'heads/production')
+                    if (parameters.repo === 'tags-slave-repo' && parameters.ref === 'heads/production')
                     {
                         return { data: { object: { type: 'commit', sha: PRODUCTION_SHA } } };
                     }
-                    if (existingReferences[parameters.ref])
+                    if (options.parentBranchExists && parameters.repo === 'tags-slave-repo')
                     {
-                        return { data: { object: existingReferences[parameters.ref] } };
+                        return { data: { object: { type: 'commit', sha: PRODUCTION_SHA } } };
                     }
 
                     throw CreateNotFoundError();
                 },
-                getTag: async () => ({
-                    data: { object: { type: 'commit', sha: SOURCE_SHA } }
-                }),
                 createRef: async (parameters) =>
                 {
                     createdReferences.push(parameters);
-                    return { data: { ref: parameters.ref, object: { sha: parameters.sha } } };
+                    return { data: parameters };
                 }
             },
             pulls: {
-                list: async () => ({ data: existingPullRequests }),
+                list: async () => ({ data: pullRequests }),
                 create: async (parameters) =>
                 {
                     createdPullRequests.push(parameters);
                     return {
                         data: {
                             number: 41,
-                            html_url: 'https://github.com/imperia-scm/scp-codex/pull/41',
+                            html_url: 'https://github.com/Imperia-Rminana/tags-slave-repo/pull/41',
+                            state: 'open',
                             body: parameters.body,
-                            head: { ref: parameters.head.split(':')[1], sha: SOURCE_SHA },
+                            head: {
+                                ref: parameters.head.split(':')[1],
+                                sha: SOURCE_SHA,
+                                repo: { full_name: 'imperia-scm/tags-slave-repo-fork' }
+                            },
                             base: { ref: parameters.base }
                         }
                     };
+                },
+                update: async (parameters) =>
+                {
+                    updatedPullRequests.push(parameters);
+                    return {
+                        data: {
+                            number: parameters.pull_number,
+                            html_url: `https://github.com/Imperia-Rminana/tags-slave-repo/pull/${parameters.pull_number}`,
+                            state: 'open',
+                            body: parameters.body,
+                            head: {
+                                ref: options.sourceBranch || 'release/2.0',
+                                sha: options.sourceSha || SOURCE_SHA,
+                                repo: { full_name: 'imperia-scm/tags-slave-repo-fork' }
+                            },
+                            base: {
+                                ref: options.sourceBranch && options.sourceBranch.startsWith('boost/')
+                                    ? options.sourceBranch
+                                    : 'production'
+                            }
+                        }
+                    };
+                }
+            },
+            repos: {
+                createCommitStatus: async (parameters) =>
+                {
+                    createdStatuses.push(parameters);
+                    return { data: parameters };
                 }
             }
         }
     };
 
-    return { github, createdReferences, createdPullRequests };
+    return {
+        github,
+        createdReferences,
+        createdPullRequests,
+        updatedPullRequests,
+        createdStatuses
+    };
 }
 
 function CreateOpenPromotionParameters(github, overrides = {})
@@ -177,596 +227,519 @@ function CreateOpenPromotionParameters(github, overrides = {})
         core: { setOutput: () => {}, info: () => {} },
         inputs: {
             DEVELOPMENT_OWNER: 'imperia-scm',
-            DEVELOPMENT_REPOSITORY: 'scp-studio-development',
-            PARENT_OWNER: 'imperia-scm',
-            PARENT_REPOSITORY: 'scp-codex',
+            DEVELOPMENT_REPOSITORY: 'tags-slave-repo-fork',
+            PARENT_OWNER: 'Imperia-Rminana',
+            PARENT_REPOSITORY: 'tags-slave-repo',
             TAG: 'core/2.0.0',
             TARGET_SHA: SOURCE_SHA,
-            RUN_URL: 'https://github.com/imperia-scm/scp-management/actions/runs/42',
+            SOURCE_BRANCH: 'release/2.0',
+            PREVIOUS_TAG: 'core/1.9.4',
+            IS_OVERRIDE: 'false',
+            OVERRIDE_REASON: '',
+            REQUESTED_BY: 'release-manager',
+            RUN_URL: 'https://github.com/Imperia-Rminana/tags-master-repo/actions/runs/42',
+            CONTRACT_SECRET,
             ...overrides
         }
     };
 }
 
-test('OpenPromotion creates an immutable Core snapshot and parent pull request', async () =>
+test('OpenPromotion opens a direct Core PR and marks the built SHA successful', async () =>
 {
-    const state = CreatePromotionGithub();
+    const state = CreateOpenPromotionGithub();
 
     const result = await OpenPromotion(CreateOpenPromotionParameters(state.github));
 
-    assert.equal(result.promotionBranch, 'promotion/core/2.0.0');
-    assert.equal(state.createdReferences.length, 1);
-    assert.deepEqual(state.createdReferences[0], {
-        owner: 'imperia-scm',
-        repo: 'scp-studio-development',
-        ref: 'refs/heads/promotion/core/2.0.0',
-        sha: SOURCE_SHA
-    });
+    assert.equal(result.sourceBranch, 'release/2.0');
+    assert.equal(result.pullRequestNumber, 41);
+    assert.equal(state.createdReferences.length, 0);
     assert.equal(state.createdPullRequests.length, 1);
+    assert.equal(state.createdPullRequests[0].head, 'imperia-scm:release/2.0');
+    assert.equal(state.createdPullRequests[0].head_repo, 'tags-slave-repo-fork');
     assert.equal(state.createdPullRequests[0].base, 'production');
-    assert.equal(state.createdPullRequests[0].head, 'imperia-scm:promotion/core/2.0.0');
-    assert.equal(state.createdPullRequests[0].head_repo, 'scp-studio-development');
+    assert.equal(
+        state.createdPullRequests[0].body,
+        'Release candidate contract is being signed by scp-management.'
+    );
+    assert.equal(state.updatedPullRequests[0].pull_number, 41);
+    assert.deepEqual(
+        ParsePromotionMarker(state.updatedPullRequests[0].body, CONTRACT_SECRET, 41),
+        CreateMarkerMetadata()
+    );
+    assert.deepEqual(state.createdStatuses[0], {
+        owner: 'Imperia-Rminana',
+        repo: 'tags-slave-repo',
+        sha: SOURCE_SHA,
+        state: 'success',
+        context: 'scp-management/release-candidate',
+        description: 'Release candidate build passed',
+        target_url: 'https://github.com/Imperia-Rminana/tags-master-repo/actions/runs/42'
+    });
 });
 
-test('OpenPromotion creates a missing Booster base from parent production', async () =>
+test('OpenPromotion creates a missing Booster base and opens from the direct Booster branch', async () =>
 {
-    const state = CreatePromotionGithub({ tag: 'boost/demo/2.0.0' });
+    const state = CreateOpenPromotionGithub({ sourceBranch: 'boost/demo/2.0' });
     const parameters = CreateOpenPromotionParameters(state.github, {
-        TAG: 'boost/demo/2.0.0'
+        TAG: 'boost/demo/2.0.0',
+        SOURCE_BRANCH: 'boost/demo/2.0',
+        PREVIOUS_TAG: 'boost/demo/1.9.0'
     });
 
     const result = await OpenPromotion(parameters);
 
-    assert.equal(result.parentBaseBranch, 'boost/demo/2.0');
     assert.equal(result.parentBranchCreated, true);
-    assert.deepEqual(state.createdReferences[1], {
-        owner: 'imperia-scm',
-        repo: 'scp-codex',
+    assert.deepEqual(state.createdReferences[0], {
+        owner: 'Imperia-Rminana',
+        repo: 'tags-slave-repo',
         ref: 'refs/heads/boost/demo/2.0',
         sha: PRODUCTION_SHA
     });
+    assert.equal(state.createdPullRequests[0].head, 'imperia-scm:boost/demo/2.0');
+    assert.equal(state.createdPullRequests[0].base, 'boost/demo/2.0');
 });
 
-test('OpenPromotion rejects an existing snapshot at another SHA', async () =>
+test('OpenPromotion reuses a matching signed open PR after the source branch advances', async () =>
 {
-    const state = CreatePromotionGithub({
-        existingReferences: {
-            'heads/promotion/core/2.0.0': {
-                type: 'commit',
-                sha: PRODUCTION_SHA
-            }
-        }
-    });
-
-    await assert.rejects(
-        OpenPromotion(CreateOpenPromotionParameters(state.github)),
-        /snapshot.*instead of/i
-    );
-    assert.equal(state.createdPullRequests.length, 0);
-});
-
-test('OpenPromotion reuses matching snapshot and pull request', async () =>
-{
-    const contract = ParseTag('core/2.0.0');
-    const marker = CreatePromotionMarker(
-        contract,
-        SOURCE_SHA,
-        'imperia-scm/scp-studio-development',
-        'https://github.com/imperia-scm/scp-management/actions/runs/41'
-    );
+    const marker = CreatePromotionMarker(CreateMarkerMetadata(), CONTRACT_SECRET, 40);
     const existingPullRequest = {
-        number: 41,
-        html_url: 'https://example.test/pull/41',
+        number: 40,
+        html_url: 'https://github.com/Imperia-Rminana/tags-slave-repo/pull/40',
         state: 'open',
         body: marker,
-        head: { sha: SOURCE_SHA },
+        head: {
+            ref: 'release/2.0',
+            sha: NEXT_SHA,
+            repo: { full_name: 'imperia-scm/tags-slave-repo-fork' }
+        },
         base: { ref: 'production' }
     };
-    const state = CreatePromotionGithub({
-        existingReferences: {
-            'heads/promotion/core/2.0.0': { type: 'commit', sha: SOURCE_SHA }
-        },
-        existingPullRequests: [existingPullRequest]
+    const state = CreateOpenPromotionGithub({
+        pullRequests: [existingPullRequest],
+        sourceSha: NEXT_SHA
     });
+
+    const result = await OpenPromotion(CreateOpenPromotionParameters(state.github, {
+        TARGET_SHA: NEXT_SHA
+    }));
+
+    assert.equal(result.pullRequestNumber, 40);
+    assert.equal(state.createdPullRequests.length, 0);
+    assert.equal(state.createdStatuses[0].sha, NEXT_SHA);
+});
+
+test('OpenPromotion repairs a PR whose contract update was interrupted', async () =>
+{
+    const pendingPullRequest = {
+        number: 40,
+        html_url: 'https://github.com/Imperia-Rminana/tags-slave-repo/pull/40',
+        state: 'open',
+        body: 'Release candidate contract is being signed by scp-management.',
+        head: {
+            ref: 'release/2.0',
+            sha: SOURCE_SHA,
+            repo: { full_name: 'imperia-scm/tags-slave-repo-fork' }
+        },
+        base: { ref: 'production' }
+    };
+    const state = CreateOpenPromotionGithub({ pullRequests: [pendingPullRequest] });
+
+    const result = await OpenPromotion(CreateOpenPromotionParameters(state.github));
+
+    assert.equal(result.pullRequestNumber, 40);
+    assert.equal(state.createdPullRequests.length, 0);
+    assert.equal(state.updatedPullRequests[0].pull_number, 40);
+    assert.deepEqual(
+        ParsePromotionMarker(state.updatedPullRequests[0].body, CONTRACT_SECRET, 40),
+        CreateMarkerMetadata()
+    );
+});
+
+test('OpenPromotion ignores a same-branch PR from the parent repository', async () =>
+{
+    const unrelatedPullRequest = {
+        number: 39,
+        state: 'open',
+        body: 'Unrelated pull request',
+        head: {
+            ref: 'release/2.0',
+            sha: SOURCE_SHA,
+            repo: { full_name: 'Imperia-Rminana/tags-slave-repo' }
+        },
+        base: { ref: 'production' }
+    };
+    const state = CreateOpenPromotionGithub({ pullRequests: [unrelatedPullRequest] });
 
     const result = await OpenPromotion(CreateOpenPromotionParameters(state.github));
 
     assert.equal(result.pullRequestNumber, 41);
-    assert.equal(state.createdReferences.length, 0);
-    assert.equal(state.createdPullRequests.length, 0);
+    assert.equal(state.createdPullRequests.length, 1);
 });
 
-test('OpenPromotion rejects conflicting or duplicate pull requests', async () =>
+test('OpenPromotion rejects branch drift and manipulated existing contracts', async () =>
 {
-    const contract = ParseTag('core/2.0.0');
-    const conflictingMarker = CreatePromotionMarker(
-        contract,
-        PRODUCTION_SHA,
-        'imperia-scm/scp-studio-development',
-        'https://github.com/imperia-scm/scp-management/actions/runs/42'
+    const moved = CreateOpenPromotionGithub({ sourceSha: NEXT_SHA });
+    await assert.rejects(
+        OpenPromotion(CreateOpenPromotionParameters(moved.github)),
+        /moved/i
     );
-    const pullRequest = {
-        state: 'open',
-        body: conflictingMarker,
-        head: { sha: SOURCE_SHA },
-        base: { ref: 'production' }
-    };
-    const conflicting = CreatePromotionGithub({ existingPullRequests: [pullRequest] });
+
+    const marker = CreatePromotionMarker(CreateMarkerMetadata(), CONTRACT_SECRET, 40)
+        .replace('core/2.0.0', 'core/9.0.0');
+    const conflicting = CreateOpenPromotionGithub({
+        pullRequests: [{
+            number: 40,
+            state: 'open',
+            body: marker,
+            head: {
+                ref: 'release/2.0',
+                sha: SOURCE_SHA,
+                repo: { full_name: 'imperia-scm/tags-slave-repo-fork' }
+            },
+            base: { ref: 'production' }
+        }]
+    });
     await assert.rejects(
         OpenPromotion(CreateOpenPromotionParameters(conflicting.github)),
-        /metadata conflicts/i
-    );
-
-    const duplicate = CreatePromotionGithub({ existingPullRequests: [pullRequest, pullRequest] });
-    await assert.rejects(
-        OpenPromotion(CreateOpenPromotionParameters(duplicate.github)),
-        /more than one/i
+        /signature/i
     );
 });
 
-test('OpenPromotion validates required inputs, SHA and source tag', async () =>
+function CreateValidationGithub(options = {})
 {
-    const state = CreatePromotionGithub();
-    await assert.rejects(
-        OpenPromotion(CreateOpenPromotionParameters(state.github, { RUN_URL: '' })),
-        /RUN_URL is required/i
-    );
-    await assert.rejects(
-        OpenPromotion(CreateOpenPromotionParameters(state.github, { TARGET_SHA: 'bad' })),
-        /target SHA/i
-    );
-
-    const missingTag = CreatePromotionGithub();
-    missingTag.github.rest.git.getRef = async () => { throw CreateNotFoundError(); };
-    await assert.rejects(
-        OpenPromotion(CreateOpenPromotionParameters(missingTag.github)),
-        /tag.*does not exist/i
-    );
-});
-
-test('EnsureReference recovers from a concurrent matching creation', async () =>
-{
-    let readCount = 0;
-    const github = {
-        rest: {
-            git: {
-                getRef: async () =>
-                {
-                    readCount++;
-                    if (readCount === 1)
-                    {
-                        throw CreateNotFoundError();
-                    }
-                    return { data: { object: { type: 'commit', sha: SOURCE_SHA } } };
-                },
-                createRef: async () =>
-                {
-                    const error = new Error('already exists');
-                    error.status = 422;
-                    throw error;
-                }
-            }
-        }
-    };
-
-    const created = await OpenPromotion.EnsureReference({
-        github,
-        owner: 'owner',
-        repository: 'repository',
-        branch: 'promotion/core/2.0.0',
-        targetSha: SOURCE_SHA,
-        displayName: 'Snapshot'
-    });
-
-    assert.equal(created, false);
-});
-
-test('OpenPromotion helpers propagate API failures and source-tag conflicts', async () =>
-{
-    const apiError = new Error('GitHub unavailable');
-    apiError.status = 500;
-    const github = { rest: { git: { getRef: async () => { throw apiError; } } } };
-    await assert.rejects(
-        OpenPromotion.GetReferenceOrNull(github, 'owner', 'repo', 'heads/main'),
-        /unavailable/i
-    );
-
-    const state = CreatePromotionGithub();
-    state.github.rest.git.getTag = async () => ({
-        data: { object: { type: 'commit', sha: PRODUCTION_SHA } }
-    });
-    await assert.rejects(
-        OpenPromotion(CreateOpenPromotionParameters(state.github)),
-        /resolves to.*instead of/i
-    );
-});
-
-test('EnsureReference rejects unrecoverable and conflicting concurrent creation', async () =>
-{
-    const parameters = {
-        owner: 'owner',
-        repository: 'repo',
-        branch: 'promotion/core/2.0.0',
-        targetSha: SOURCE_SHA,
-        displayName: 'Snapshot'
-    };
-    const apiError = new Error('server failure');
-    apiError.status = 500;
-    const unrecoverable = {
-        rest: {
-            git: {
-                getRef: async () => { throw CreateNotFoundError(); },
-                createRef: async () => { throw apiError; }
-            }
-        }
-    };
-    await assert.rejects(
-        OpenPromotion.EnsureReference({ github: unrecoverable, ...parameters }),
-        /server failure/i
-    );
-
-    let readCount = 0;
-    const conflicting = {
-        rest: {
-            git: {
-                getRef: async () =>
-                {
-                    readCount++;
-                    if (readCount === 1)
-                    {
-                        throw CreateNotFoundError();
-                    }
-                    return { data: { object: { type: 'commit', sha: PRODUCTION_SHA } } };
-                },
-                createRef: async () =>
-                {
-                    const error = new Error('exists');
-                    error.status = 422;
-                    throw error;
-                }
-            }
-        }
-    };
-    await assert.rejects(
-        OpenPromotion.EnsureReference({ github: conflicting, ...parameters }),
-        /concurrently created.*instead of/i
-    );
-});
-
-test('EnsureBoosterBaseBranch reuses an existing base and requires production', async () =>
-{
-    const contract = ParseTag('boost/demo/2.0.0');
-    const existing = {
-        rest: {
-            git: {
-                getRef: async () => ({
-                    data: { object: { type: 'commit', sha: PRODUCTION_SHA } }
-                })
-            }
-        }
-    };
-    assert.equal(await OpenPromotion.EnsureBoosterBaseBranch({
-        github: existing,
-        contract,
-        parentOwner: 'owner',
-        parentRepository: 'repo'
-    }), false);
-
-    const missing = {
-        rest: { git: { getRef: async () => { throw CreateNotFoundError(); } } }
-    };
-    await assert.rejects(
-        OpenPromotion.EnsureBoosterBaseBranch({
-            github: missing,
-            contract,
-            parentOwner: 'owner',
-            parentRepository: 'repo'
-        }),
-        /production branch does not exist/i
-    );
-});
-
-test('EnsurePromotionPullRequest rejects mismatched existing pull request fields', async () =>
-{
-    const contract = ParseTag('core/2.0.0');
-    const marker = CreatePromotionMarker(
-        contract,
-        SOURCE_SHA,
-        'imperia-scm/scp-studio-development',
-        'https://example.test/run'
-    );
-    const baseParameters = {
-        contract,
-        developmentOwner: 'imperia-scm',
-        developmentRepository: 'scp-studio-development',
-        parentOwner: 'imperia-scm',
-        parentRepository: 'scp-codex',
-        targetSha: SOURCE_SHA,
-        runUrl: 'https://example.test/run'
-    };
-    for (const [pullRequest, message] of [
-        [{ state: 'open', body: marker, head: { sha: PRODUCTION_SHA }, base: { ref: 'production' } }, /head is/i],
-        [{ state: 'open', body: marker, head: { sha: SOURCE_SHA }, base: { ref: 'main' } }, /unexpected parent branch/i],
-        [{ state: 'closed', body: marker, head: { sha: SOURCE_SHA }, base: { ref: 'production' } }, /closed without merging/i]
-    ])
-    {
-        const github = { rest: { pulls: { list: async () => ({ data: [pullRequest] }) } } };
-        await assert.rejects(
-            OpenPromotion.EnsurePromotionPullRequest({ github, ...baseParameters }),
-            message
-        );
-    }
-});
-
-const MERGE_SHA = '2222222222222222222222222222222222222222';
-
-function CreateFinalizationGithub(options = {})
-{
-    const tag = options.tag || 'core/2.0.0';
-    const contract = ParseTag(tag);
-    const marker = CreatePromotionMarker(
-        contract,
-        SOURCE_SHA,
-        'imperia-scm/scp-studio-development',
-        'https://github.com/imperia-scm/scp-management/actions/runs/42'
-    );
-    const createdTags = [];
-    const createdReferences = [];
-    const createdPullRequests = [];
-    const deletedReferences = [];
+    const statuses = options.statuses || [];
+    const createdStatuses = [];
     const pullRequest = {
-        number: 51,
-        state: options.state || 'closed',
-        merged: options.merged === undefined ? true : options.merged,
-        merged_at: options.merged === false ? null : '2026-08-20T10:00:00Z',
-        merge_commit_sha: MERGE_SHA,
-        body: marker,
+        number: 41,
+        state: 'open',
+        body: CreatePromotionMarker(CreateMarkerMetadata(), CONTRACT_SECRET, 41),
         head: {
-            ref: contract.promotionBranch,
-            sha: SOURCE_SHA,
-            repo: { full_name: 'imperia-scm/scp-studio-development' }
+            ref: 'release/2.0',
+            sha: options.headSha || SOURCE_SHA,
+            repo: { full_name: 'imperia-scm/tags-slave-repo-fork' }
         },
-        base: { ref: contract.parentBaseBranch },
-        html_url: 'https://github.com/imperia-scm/scp-codex/pull/51'
+        base: { ref: 'production' }
     };
     const github = {
         rest: {
             pulls: {
-                get: async () => ({ data: pullRequest }),
-                list: async () => ({ data: options.existingReturnPullRequests || [] }),
-                create: async (parameters) =>
-                {
-                    createdPullRequests.push(parameters);
-                    return { data: { number: 52, html_url: 'https://example.test/pull/52' } };
-                }
-            },
-            git: {
-                getRef: async (parameters) =>
-                {
-                    if (!options.missingSourceTag && parameters.repo === 'scp-studio-development' &&
-                        parameters.ref === `tags/${tag}`)
-                    {
-                        return { data: { object: { type: 'tag', sha: 'source-tag-object' } } };
-                    }
-                    if (!options.missingSnapshot && parameters.repo === 'scp-studio-development' &&
-                        parameters.ref === `heads/${contract.promotionBranch}`)
-                    {
-                        return {
-                            data: {
-                                object: {
-                                    type: 'commit',
-                                    sha: options.snapshotSha || SOURCE_SHA
-                                }
-                            }
-                        };
-                    }
-                    if (parameters.repo === 'scp-codex' && parameters.ref === `tags/${tag}`)
-                    {
-                        if (options.parentTagExists)
-                        {
-                            return { data: { object: { type: 'tag', sha: 'parent-tag-object' } } };
-                        }
-                        throw CreateNotFoundError();
-                    }
-
-                    throw CreateNotFoundError();
-                },
-                getTag: async (parameters) => ({
-                    data: {
-                        object: {
-                            type: 'commit',
-                            sha: parameters.repo === 'scp-codex' ? MERGE_SHA : SOURCE_SHA
-                        }
-                    }
-                }),
-                createTag: async (parameters) =>
-                {
-                    createdTags.push(parameters);
-                    return { data: { sha: 'parent-tag-object' } };
-                },
-                createRef: async (parameters) =>
-                {
-                    createdReferences.push(parameters);
-                    return { data: {} };
-                },
-                deleteRef: async (parameters) =>
-                {
-                    deletedReferences.push(parameters);
-                    return { data: {} };
-                }
+                get: async () => ({ data: pullRequest })
             },
             repos: {
-                getCommit: async () => ({
-                    data: {
-                        sha: MERGE_SHA,
-                        parents: [{ sha: PRODUCTION_SHA }, { sha: SOURCE_SHA }]
-                    }
-                }),
-                compareCommitsWithBasehead: async () => ({
-                    data: { ahead_by: options.aheadBy === undefined ? 1 : options.aheadBy }
-                })
+                listCommitStatusesForRef: async () => ({ data: statuses }),
+                createCommitStatus: async (parameters) =>
+                {
+                    createdStatuses.push(parameters);
+                    return { data: parameters };
+                }
             }
         }
     };
-
-    return {
-        github,
-        pullRequest,
-        createdTags,
-        createdReferences,
-        createdPullRequests,
-        deletedReferences
-    };
+    return { github, pullRequest, createdStatuses };
 }
 
-function CreateFinalizationParameters(github)
+function CreateValidationParameters(github, overrides = {})
 {
     return {
         github,
         core: { setOutput: () => {}, info: () => {} },
         inputs: {
-            PARENT_OWNER: 'imperia-scm',
-            PARENT_REPOSITORY: 'scp-codex',
             DEVELOPMENT_OWNER: 'imperia-scm',
-            DEVELOPMENT_REPOSITORY: 'scp-studio-development',
-            DEVELOPMENT_TRUNK_BRANCH: 'main_development',
-            PULL_REQUEST_NUMBER: '51',
-            RUN_URL: 'https://github.com/imperia-scm/scp-management/actions/runs/99'
+            DEVELOPMENT_REPOSITORY: 'tags-slave-repo-fork',
+            PARENT_OWNER: 'Imperia-Rminana',
+            PARENT_REPOSITORY: 'tags-slave-repo',
+            PULL_REQUEST_NUMBER: '41',
+            EXPECTED_HEAD_SHA: SOURCE_SHA,
+            CONTRACT_SECRET,
+            RUN_URL: 'https://github.com/Imperia-Rminana/tags-master-repo/actions/runs/43',
+            ...overrides
         }
     };
 }
 
-test('FinalizePromotion tags a valid Core merge and opens production reintegration', async () =>
+test('ValidatePromotion validates the signed current head and publishes statuses', async () =>
+{
+    const state = CreateValidationGithub();
+    const candidate = await ValidatePromotion.ReadCandidate(
+        CreateValidationParameters(state.github)
+    );
+
+    assert.equal(candidate.stale, false);
+    assert.equal(candidate.requiresBuild, true);
+    assert.equal(candidate.headSha, SOURCE_SHA);
+    assert.equal(candidate.sourceBranch, 'release/2.0');
+
+    await ValidatePromotion.SetCandidateStatus({
+        github: state.github,
+        inputs: CreateValidationParameters(state.github).inputs,
+        headSha: SOURCE_SHA,
+        state: 'pending'
+    });
+    assert.equal(state.createdStatuses[0].context, 'scp-management/release-candidate');
+    assert.equal(state.createdStatuses[0].state, 'pending');
+});
+
+test('ValidatePromotion ignores stale dispatches and reuses success for the same SHA', async () =>
+{
+    const staleState = CreateValidationGithub({ headSha: NEXT_SHA });
+    const stale = await ValidatePromotion.ReadCandidate(
+        CreateValidationParameters(staleState.github)
+    );
+    assert.equal(stale.stale, true);
+
+    const successfulState = CreateValidationGithub({
+        statuses: [{
+            context: 'scp-management/release-candidate',
+            state: 'success',
+            sha: SOURCE_SHA
+        }]
+    });
+    const successful = await ValidatePromotion.ReadCandidate(
+        CreateValidationParameters(successfulState.github)
+    );
+    assert.equal(successful.requiresBuild, false);
+});
+
+test('ValidatePromotion rejects invalid candidate shape and status values', async () =>
+{
+    const state = CreateValidationGithub();
+    state.pullRequest.base.ref = 'main';
+    await assert.rejects(
+        ValidatePromotion.ReadCandidate(CreateValidationParameters(state.github)),
+        /target/i
+    );
+    await assert.rejects(
+        ValidatePromotion.SetCandidateStatus({
+            github: state.github,
+            inputs: CreateValidationParameters(state.github).inputs,
+            headSha: SOURCE_SHA,
+            state: 'unknown'
+        }),
+        /status state/i
+    );
+});
+
+function CreateFinalizationGithub(options = {})
+{
+    const createdTags = [];
+    const createdPullRequests = [];
+    const uploadedAssets = [];
+    const comparisons = [];
+    const listCommits = async () => undefined;
+    const listReleaseAssets = async () => undefined;
+    const marker = CreatePromotionMarker(CreateMarkerMetadata(), CONTRACT_SECRET, 41);
+    const pullRequest = {
+        number: 41,
+        state: 'closed',
+        merged: true,
+        merged_at: '2026-08-20T10:00:00Z',
+        merge_commit_sha: MERGE_SHA,
+        merged_by: { login: 'merger' },
+        html_url: 'https://github.com/Imperia-Rminana/tags-slave-repo/pull/41',
+        body: options.body || marker,
+        head: {
+            ref: 'release/2.0',
+            sha: options.pullHeadSha || SOURCE_SHA,
+            repo: { full_name: 'imperia-scm/tags-slave-repo-fork' }
+        },
+        base: { ref: 'production' }
+    };
+    const github = {
+        paginate: async (method) =>
+        {
+            if (method === listCommits)
+            {
+                return options.commits || [{ sha: SOURCE_SHA }];
+            }
+            if (method === listReleaseAssets)
+            {
+                return [];
+            }
+            throw new Error('Unexpected pagination method.');
+        },
+        rest: {
+            pulls: {
+                get: async () => ({ data: pullRequest }),
+                listCommits,
+                list: async () => ({ data: options.reintegrationPullRequests || [] }),
+                create: async (parameters) =>
+                {
+                    createdPullRequests.push(parameters);
+                    return { data: { html_url: 'https://github.com/dev/pull/99' } };
+                }
+            },
+            git: {
+                getRef: async () => { throw CreateNotFoundError(); },
+                createTag: async (parameters) =>
+                {
+                    createdTags.push(parameters);
+                    return { data: { sha: `tag-object-${createdTags.length}` } };
+                },
+                createRef: async (parameters) => ({ data: parameters })
+            },
+            repos: {
+                listCommitStatusesForRef: async () => ({
+                    data: options.statuses || [{
+                        context: 'scp-management/release-candidate',
+                        state: 'success',
+                        sha: SOURCE_SHA
+                    }]
+                }),
+                getCommit: async () => ({
+                    data: {
+                        sha: MERGE_SHA,
+                        parents: options.parents || [
+                            { sha: PRODUCTION_SHA },
+                            { sha: SOURCE_SHA }
+                        ]
+                    }
+                }),
+                getReleaseByTag: async () => { throw CreateNotFoundError(); },
+                generateReleaseNotes: async () => ({ data: { body: 'Generated notes' } }),
+                createRelease: async () => ({ data: { id: 50 } }),
+                listReleaseAssets,
+                uploadReleaseAsset: async (parameters) =>
+                {
+                    uploadedAssets.push(parameters);
+                    return { data: parameters };
+                },
+                compareCommitsWithBasehead: async (parameters) =>
+                {
+                    comparisons.push(parameters);
+                    return { data: { ahead_by: 1 } };
+                }
+            }
+        }
+    };
+    return {
+        github,
+        pullRequest,
+        createdTags,
+        createdPullRequests,
+        uploadedAssets,
+        comparisons
+    };
+}
+
+function CreateFinalizationParameters(github, overrides = {})
+{
+    return {
+        github,
+        core: { outputs: {}, setOutput(name, value) { this.outputs[name] = value; }, info: () => {} },
+        inputs: {
+            PARENT_OWNER: 'Imperia-Rminana',
+            PARENT_REPOSITORY: 'tags-slave-repo',
+            DEVELOPMENT_OWNER: 'imperia-scm',
+            DEVELOPMENT_REPOSITORY: 'tags-slave-repo-fork',
+            DEVELOPMENT_TRUNK_BRANCH: 'main_development',
+            PULL_REQUEST_NUMBER: '41',
+            EXPECTED_HEAD_SHA: SOURCE_SHA,
+            EXPECTED_MERGE_COMMIT_SHA: MERGE_SHA,
+            CONTRACT_SECRET,
+            RUN_URL: 'https://github.com/Imperia-Rminana/tags-master-repo/actions/runs/44',
+            ...overrides
+        }
+    };
+}
+
+test('FinalizePromotion publishes Development before Codex and opens reintegration', async () =>
 {
     const state = CreateFinalizationGithub();
+    const parameters = CreateFinalizationParameters(state.github);
 
-    const result = await FinalizePromotion(CreateFinalizationParameters(state.github));
+    const result = await FinalizePromotion(parameters);
 
-    assert.equal(result.contract.tag, 'core/2.0.0');
-    assert.equal(state.createdTags[0].object, MERGE_SHA);
+    assert.equal(result.sourceSha, SOURCE_SHA);
+    assert.equal(state.createdTags.length, 2);
+    assert.equal(state.createdTags[0].repo, 'tags-slave-repo-fork');
+    assert.equal(state.createdTags[0].object, SOURCE_SHA);
+    assert.equal(state.createdTags[1].repo, 'tags-slave-repo');
+    assert.equal(state.createdTags[1].object, MERGE_SHA);
+    assert.equal(state.createdPullRequests[0].head, 'Imperia-Rminana:production');
     assert.equal(state.createdPullRequests[0].base, 'main_development');
-    assert.equal(state.createdPullRequests[0].head, 'imperia-scm:production');
-    assert.equal(state.createdPullRequests[0].head_repo, 'scp-codex');
-    assert.deepEqual(state.deletedReferences[0], {
-        owner: 'imperia-scm',
-        repo: 'scp-studio-development',
-        ref: 'heads/promotion/core/2.0.0'
-    });
+    assert.equal(state.comparisons[0].basehead, `main_development...${MERGE_SHA}`);
+    const metadata = JSON.parse(state.uploadedAssets[0].data.toString('utf8'));
+    assert.equal(metadata.schemaVersion, 2);
+    assert.equal(metadata.commit, SOURCE_SHA);
+    assert.equal(metadata.promotionPullRequestUrl, state.pullRequest.html_url);
 });
 
-test('FinalizePromotion tags a valid Booster merge and reintegrates its parent branch', async () =>
+test('FinalizePromotion ignores source branch commits pushed after the merge', async () =>
 {
-    const state = CreateFinalizationGithub({ tag: 'boost/demo/2.0.0' });
-
-    await FinalizePromotion(CreateFinalizationParameters(state.github));
-
-    assert.equal(state.createdPullRequests[0].head, 'imperia-scm:boost/demo/2.0');
-});
-
-test('FinalizePromotion rejects an open pull request', async () =>
-{
-    const state = CreateFinalizationGithub({ state: 'open', merged: false });
-
-    await assert.rejects(
-        FinalizePromotion(CreateFinalizationParameters(state.github)),
-        /merged/i
-    );
-    assert.equal(state.createdTags.length, 0);
-});
-
-test('FinalizePromotion rejects squash and rebase merge topology', async () =>
-{
-    const state = CreateFinalizationGithub();
-    state.github.rest.repos.getCommit = async () => ({
-        data: { sha: MERGE_SHA, parents: [{ sha: PRODUCTION_SHA }] }
-    });
-
-    await assert.rejects(
-        FinalizePromotion(CreateFinalizationParameters(state.github)),
-        /merge commit/i
-    );
-    assert.equal(state.deletedReferences.length, 0);
-});
-
-test('FinalizePromotion skips a return pull request when comparison is empty', async () =>
-{
-    const state = CreateFinalizationGithub({ aheadBy: 0 });
+    const state = CreateFinalizationGithub({ pullHeadSha: NEXT_SHA });
 
     const result = await FinalizePromotion(CreateFinalizationParameters(state.github));
 
-    assert.equal(result.reintegration, null);
-    assert.equal(state.createdPullRequests.length, 0);
-    assert.equal(state.deletedReferences.length, 1);
+    assert.equal(result.sourceSha, SOURCE_SHA);
+    assert.equal(state.createdTags[0].object, SOURCE_SHA);
 });
 
-test('FinalizePromotion reuses an existing parent tag and reintegration pull request', async () =>
+test('FinalizePromotion only reuses reintegration PRs from the exact parent repository', async () =>
 {
-    const existingPullRequest = { number: 60, html_url: 'https://example.test/pull/60' };
-    const state = CreateFinalizationGithub({
-        parentTagExists: true,
-        existingReturnPullRequests: [existingPullRequest]
+    const wrongRepository = CreateFinalizationGithub({
+        reintegrationPullRequests: [{
+            html_url: 'https://github.com/imperia-scm/tags-slave-repo-fork/pull/88',
+            head: {
+                ref: 'production',
+                repo: { full_name: 'imperia-scm/tags-slave-repo-fork' }
+            },
+            base: { ref: 'main_development' }
+        }]
     });
 
-    const result = await FinalizePromotion(CreateFinalizationParameters(state.github));
+    await FinalizePromotion(CreateFinalizationParameters(wrongRepository.github));
 
-    assert.equal(result.tagExisted, true);
-    assert.equal(result.reintegration, existingPullRequest);
-    assert.equal(state.createdTags.length, 0);
-    assert.equal(state.createdPullRequests.length, 0);
-});
+    assert.equal(wrongRepository.createdPullRequests.length, 1);
 
-test('FinalizePromotion treats a missing snapshot as already cleaned', async () =>
-{
-    const state = CreateFinalizationGithub({ missingSnapshot: true });
-
-    const result = await FinalizePromotion(CreateFinalizationParameters(state.github));
-
-    assert.equal(result.snapshotDeleted, false);
-});
-
-test('FinalizePromotion rejects invalid identity and marker disagreements before mutation', async () =>
-{
-    const invalidNumber = CreateFinalizationGithub();
-    const invalidParameters = CreateFinalizationParameters(invalidNumber.github);
-    invalidParameters.inputs.PULL_REQUEST_NUMBER = '0';
-    await assert.rejects(FinalizePromotion(invalidParameters), /positive/i);
-
-    const wrongMarker = CreateFinalizationGithub();
-    wrongMarker.pullRequest.body = wrongMarker.pullRequest.body.replace(SOURCE_SHA, PRODUCTION_SHA);
-    await assert.rejects(
-        FinalizePromotion(CreateFinalizationParameters(wrongMarker.github)),
-        /marker does not match/i
-    );
-    assert.equal(wrongMarker.createdTags.length, 0);
-});
-
-test('FinalizePromotion rejects missing Development tags and moved snapshots', async () =>
-{
-    const missingTag = CreateFinalizationGithub({ missingSourceTag: true });
-    await assert.rejects(
-        FinalizePromotion(CreateFinalizationParameters(missingTag.github)),
-        /tag.*does not exist/i
-    );
-
-    const movedSnapshot = CreateFinalizationGithub({ snapshotSha: PRODUCTION_SHA });
-    await assert.rejects(
-        FinalizePromotion(CreateFinalizationParameters(movedSnapshot.github)),
-        /snapshot moved/i
-    );
-    assert.equal(movedSnapshot.deletedReferences.length, 0);
-});
-
-test('FinalizePromotion rejects duplicate reintegration pull requests', async () =>
-{
-    const pullRequest = { number: 60 };
-    const state = CreateFinalizationGithub({
-        existingReturnPullRequests: [pullRequest, pullRequest]
+    const expectedRepository = CreateFinalizationGithub({
+        reintegrationPullRequests: [{
+            html_url: 'https://github.com/imperia-scm/tags-slave-repo-fork/pull/89',
+            head: {
+                ref: 'production',
+                repo: { full_name: 'Imperia-Rminana/tags-slave-repo' }
+            },
+            base: { ref: 'main_development' }
+        }]
     });
 
-    await assert.rejects(
-        FinalizePromotion(CreateFinalizationParameters(state.github)),
-        /more than one reintegration/i
+    const result = await FinalizePromotion(CreateFinalizationParameters(expectedRepository.github));
+
+    assert.equal(expectedRepository.createdPullRequests.length, 0);
+    assert.equal(
+        result.reintegration.html_url,
+        'https://github.com/imperia-scm/tags-slave-repo-fork/pull/89'
     );
-    assert.equal(state.deletedReferences.length, 0);
 });
 
+test('FinalizePromotion rejects stale dispatches, failed builds and non-merge commits', async () =>
+{
+    const stale = CreateFinalizationGithub();
+    await assert.rejects(
+        FinalizePromotion(CreateFinalizationParameters(stale.github, {
+            EXPECTED_HEAD_SHA: NEXT_SHA
+        })),
+        /head SHA/i
+    );
+
+    const failed = CreateFinalizationGithub({
+        statuses: [{ context: 'scp-management/release-candidate', state: 'failure' }]
+    });
+    await assert.rejects(
+        FinalizePromotion(CreateFinalizationParameters(failed.github)),
+        /successful.*status/i
+    );
+
+    const squash = CreateFinalizationGithub({ parents: [{ sha: PRODUCTION_SHA }] });
+    await assert.rejects(
+        FinalizePromotion(CreateFinalizationParameters(squash.github)),
+        /two-parent merge commit/i
+    );
+
+    const replayed = CreateFinalizationGithub({
+        body: CreatePromotionMarker(CreateMarkerMetadata(), CONTRACT_SECRET, 40)
+    });
+    await assert.rejects(
+        FinalizePromotion(CreateFinalizationParameters(replayed.github)),
+        /signature/i
+    );
+});

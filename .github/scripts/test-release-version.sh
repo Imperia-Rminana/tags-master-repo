@@ -74,9 +74,10 @@ jq -n \
   --arg targetSha "$sha" \
   --arg previousSha 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
   '{
-    schemaVersion: 1,
+    schemaVersion: 2,
     sourceBranch: $sourceBranch,
     targetSha: $targetSha,
+    reservations: [],
     tags: [
       {name: "core/3.1.9", commitSha: $previousSha},
       {name: "core/3.2.0", commitSha: $targetSha}
@@ -93,6 +94,78 @@ resolved_recovery=$(bash "$script_dir/resolve-release.sh" \
   --state-file "$state_file")
 assert_equal 'core/3.2.0' "$(plan_value "$resolved_recovery" tag)" 'API state recovery tag'
 assert_equal 'true' "$(plan_value "$resolved_recovery" is_recovery)" 'API state recovery flag'
+
+reserved_state_file="$state_directory/reserved-state.json"
+jq -n \
+  --arg sourceBranch 'release/3.2' \
+  --arg targetSha "$sha" \
+  '{
+    schemaVersion: 2,
+    sourceBranch: $sourceBranch,
+    targetSha: $targetSha,
+    tags: [{name: "core/3.1.9", commitSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],
+    reservations: [{
+      pullRequestNumber: 42,
+      url: "https://github.com/example/parent/pull/42",
+      state: "open",
+      tag: "core/3.2.0",
+      sourceBranch: $sourceBranch,
+      previousTag: "core/3.1.9",
+      isOverride: false,
+      overrideReason: ""
+    }]
+  }' > "$reserved_state_file"
+resolved_reservation=$(bash "$script_dir/resolve-release.sh" \
+  --component core \
+  --release-line 3.2 \
+  --source-branch release/3.2 \
+  --booster-name '' \
+  --override-version '' \
+  --override-reason '' \
+  --state-file "$reserved_state_file")
+assert_equal 'core/3.2.0' "$(plan_value "$resolved_reservation" tag)" 'Open reservation tag reuse'
+assert_equal 'core/3.1.9' "$(plan_value "$resolved_reservation" previous_tag)" 'Open reservation previous tag'
+assert_equal 'true' "$(plan_value "$resolved_reservation" is_recovery)" 'Open reservation recovery flag'
+
+override_reserved_state_file="$state_directory/override-reserved-state.json"
+jq '.reservations[0] += {
+  tag: "core/3.2.6",
+  isOverride: true,
+  overrideReason: "Emergency reserved patch"
+}' "$reserved_state_file" > "$override_reserved_state_file"
+resolved_override_reservation=$(bash "$script_dir/resolve-release.sh" \
+  --component core \
+  --release-line 3.2 \
+  --source-branch release/3.2 \
+  --booster-name '' \
+  --override-version '' \
+  --override-reason '' \
+  --state-file "$override_reserved_state_file")
+assert_equal 'core/3.2.6' "$(plan_value "$resolved_override_reservation" tag)" 'Signed override reservation tag reuse'
+assert_equal 'Emergency reserved patch' "$(plan_value "$resolved_override_reservation" override_reason)" 'Signed override reservation reason reuse'
+
+merged_state_file="$state_directory/merged-state.json"
+jq '.reservations[0].state = "merged_pending"' "$reserved_state_file" > "$merged_state_file"
+assert_fails 'Merged reservation blocks another candidate' bash "$script_dir/resolve-release.sh" \
+  --component core \
+  --release-line 3.2 \
+  --source-branch release/3.2 \
+  --booster-name '' \
+  --override-version '' \
+  --override-reason '' \
+  --state-file "$merged_state_file"
+
+duplicate_state_file="$state_directory/duplicate-state.json"
+jq '.reservations += [.reservations[0]]' "$reserved_state_file" > "$duplicate_state_file"
+assert_fails 'Duplicate active reservations are rejected' bash "$script_dir/resolve-release.sh" \
+  --component core \
+  --release-line 3.2 \
+  --source-branch release/3.2 \
+  --booster-name '' \
+  --override-version '' \
+  --override-reason '' \
+  --state-file "$duplicate_state_file"
+
 assert_fails 'API state branch validation' bash "$script_dir/resolve-release.sh" \
   --component core \
   --release-line 3.2 \

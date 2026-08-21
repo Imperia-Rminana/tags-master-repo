@@ -30,6 +30,8 @@ on:
     secrets:
       SCP_STUDIO_DEVELOPMENT_PAT:
         required: true
+      SCP_PROMOTION_CONTRACT_SECRET:
+        required: true
 
 permissions:
   contents: read
@@ -37,6 +39,8 @@ permissions:
 env:
   TARGET_OWNER: imperia-scm
   TARGET_REPOSITORY: tags-slave-repo-fork
+  PARENT_OWNER: Imperia-Rminana
+  PARENT_REPOSITORY: tags-slave-repo
 
 jobs:
   prepare:
@@ -51,6 +55,7 @@ jobs:
       target_sha: ${{ steps.resolve.outputs.target_sha }}
       is_override: ${{ steps.resolve.outputs.is_override }}
       is_recovery: ${{ steps.resolve.outputs.is_recovery }}
+      override_reason: ${{ steps.resolve.outputs.override_reason }}
 
     steps:
       - name: Check out release automation
@@ -80,6 +85,7 @@ jobs:
           COMPONENT: ${{ inputs.component }}
           BOOSTER_NAME: ${{ inputs.booster_name }}
           SOURCE_BRANCH: ${{ inputs.source_branch }}
+          CONTRACT_SECRET: ${{ secrets.SCP_PROMOTION_CONTRACT_SECRET }}
         with:
           github-token: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}
           script: |
@@ -94,6 +100,9 @@ jobs:
               sourceBranch: process.env.SOURCE_BRANCH,
               component: process.env.COMPONENT,
               boosterName: process.env.BOOSTER_NAME,
+              parentOwner: process.env.PARENT_OWNER,
+              parentRepository: process.env.PARENT_REPOSITORY,
+              contractSecret: process.env.CONTRACT_SECRET,
               outputPath: './release-state.json'
             });
 
@@ -160,77 +169,11 @@ jobs:
     secrets:
       SCP_STUDIO_DEVELOPMENT_PAT: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}
 
-  publish:
-    name: Publish ${{ needs.prepare.outputs.tag }}
+  open_promotion:
+    name: Approve and open candidate pull request
     needs:
       - prepare
       - build_core
-    if: ${{ !inputs.dry_run }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment: ${{ needs.prepare.outputs.is_override == 'true' && 'release-override' || 'release' }}
-    concurrency:
-      group: release-${{ inputs.component }}-${{ inputs.booster_name }}-${{ inputs.release_line }}
-      cancel-in-progress: false
-    permissions:
-      contents: read
-
-    steps:
-      - name: Check out release automation
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ github.workflow_sha }}
-          path: automation
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Publish tag, release and metadata in Development
-        id: publish_release
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        env:
-          TARGET_OWNER: ${{ env.TARGET_OWNER }}
-          TARGET_REPOSITORY: ${{ env.TARGET_REPOSITORY }}
-          COMPONENT: ${{ inputs.component }}
-          BOOSTER_NAME: ${{ inputs.booster_name }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-          TAG: ${{ needs.prepare.outputs.tag }}
-          TARGET_SHA: ${{ needs.prepare.outputs.target_sha }}
-          SOURCE_BRANCH: ${{ inputs.source_branch }}
-          TITLE: ${{ needs.prepare.outputs.display_name }} ${{ needs.prepare.outputs.version }}
-          PREVIOUS_TAG: ${{ needs.prepare.outputs.previous_tag }}
-          IS_OVERRIDE: ${{ needs.prepare.outputs.is_override }}
-          OVERRIDE_REASON: ${{ inputs.override_reason }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        with:
-          github-token: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}
-          script: |
-            const PublishRelease = require(
-              './automation/.github/scripts/release-api/publish-release.cjs'
-            );
-            await PublishRelease({ github, core, context, inputs: process.env });
-
-      - name: Write publication result
-        shell: bash
-        env:
-          TAG: ${{ needs.prepare.outputs.tag }}
-          TAG_EXISTED: ${{ steps.publish_release.outputs.tag_existed }}
-          RELEASE_CREATED: ${{ steps.publish_release.outputs.release_created }}
-          TARGET_REPOSITORY: ${{ env.TARGET_OWNER }}/${{ env.TARGET_REPOSITORY }}
-        run: |
-          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
-          ## Publication completed
-
-          - Tag: \`$TAG\`
-          - Repository: \`$TARGET_REPOSITORY\`
-          - Tag already existed: \`$TAG_EXISTED\`
-          - GitHub Release created in this run: \`$RELEASE_CREATED\`
-          EOF
-
-  open_promotion:
-    name: Open promotion pull request
-    needs:
-      - prepare
-      - publish
     if: ${{ !inputs.dry_run }}
     uses: ./.github/workflows/_open-promotion.yml
     permissions:
@@ -238,5 +181,13 @@ jobs:
     with:
       tag: ${{ needs.prepare.outputs.tag }}
       target_sha: ${{ needs.prepare.outputs.target_sha }}
+      source_branch: ${{ inputs.source_branch }}
+      previous_tag: ${{ needs.prepare.outputs.previous_tag }}
+      is_override: ${{ needs.prepare.outputs.is_override }}
+      override_reason: ${{ needs.prepare.outputs.override_reason }}
+      requested_by: ${{ github.actor }}
+      approval_environment: ${{ needs.prepare.outputs.is_override == 'true' && 'release-override' || 'release' }}
+      concurrency_group: release-${{ inputs.component }}-${{ inputs.booster_name }}-${{ inputs.release_line }}
     secrets:
       SCP_STUDIO_DEVELOPMENT_PAT: ${{ secrets.SCP_STUDIO_DEVELOPMENT_PAT }}
+      SCP_PROMOTION_CONTRACT_SECRET: ${{ secrets.SCP_PROMOTION_CONTRACT_SECRET }}
